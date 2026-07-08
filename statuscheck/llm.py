@@ -27,15 +27,38 @@ DEFAULT_MODELS = {
     "ollama": "llama3.1",
 }
 
-SYSTEM_PROMPT = (
-    "You are an expert in site reliability engineering and incident "
-    "communications. You are analyzing a company's public status page "
-    "history from the outside. Be specific, evidence-based, and neutral in "
-    "tone — frame findings as opportunities, not criticism. Ground every "
-    "claim in the data provided. Respond in GitHub-flavored markdown with "
-    "no top-level heading (your output is inserted under an existing "
-    "section heading)."
+_STYLE_RULES = (
+    "Be specific and evidence-based; ground every claim in the data "
+    "provided. Respond in GitHub-flavored markdown with no top-level "
+    "heading (your output is inserted under an existing section heading)."
 )
+
+SYSTEM_PROMPTS = {
+    "neutral": (
+        "You are an expert in site reliability engineering and incident "
+        "communications, analyzing a company's public status page history "
+        "from the outside. Keep a neutral tone — frame findings as "
+        "opportunities, not criticism. " + _STYLE_RULES
+    ),
+    "self": (
+        "You are an expert in site reliability engineering and incident "
+        "communications, advising this company's own incident/comms team on "
+        "an internal audit of their public status page. Address the team "
+        "directly and be candid — they asked for this review and want to "
+        "improve, not be flattered. " + _STYLE_RULES
+    ),
+    "vendor": (
+        "You are an expert in site reliability engineering, advising a team "
+        "that is evaluating this company as a potential vendor they would "
+        "depend on. Your reader's question is 'how risky is this dependency, "
+        "and what should we verify before signing?' — not how the vendor "
+        "could improve. Note that incident volume also reflects disclosure "
+        "practices: a transparent vendor can look worse than a secretive "
+        "one. " + _STYLE_RULES
+    ),
+}
+
+SYSTEM_PROMPT = SYSTEM_PROMPTS["neutral"]  # default for direct complete() calls
 
 
 class LLMError(Exception):
@@ -145,11 +168,42 @@ def complete(provider, model, prompt, system=SYSTEM_PROMPT):
 
 
 def build_context(
-    company, stats_all, messaging, cadence, comparison, sample_messages, lifecycle=None
+    company, stats_all, messaging, cadence, comparison, sample_messages,
+    lifecycle=None, transparency=None, downtime=None, focus_terms=None,
 ):
     """Assemble the compact JSON context shared by all LLM prompts."""
     ctx = {
         "company": company,
+        "focus": (
+            f"Analysis restricted to components matching: {focus_terms}"
+            if focus_terms
+            else None
+        ),
+        "transparency_signals": (
+            {
+                "severity_coverage_pct": round(transparency["severity_coverage_pct"]),
+                "major_or_critical_count": transparency["major_count"],
+                "never_declared_above_minor": transparency["never_above_minor"],
+                "postmortem_rate_pct": round(transparency["postmortem_rate_pct"]),
+                "postmortem_basis": transparency["postmortem_basis"],
+                "incidents_disclosed_24h_late": len(transparency["backfilled"]),
+            }
+            if transparency
+            else None
+        ),
+        "disclosed_downtime": (
+            {
+                "basis": downtime["basis"],
+                "incident_count": downtime["incident_count"],
+                "total_hours": round(downtime["total_minutes"] / 60, 1),
+                "window_days": downtime["window_days"],
+                "implied_disclosed_availability_pct": round(
+                    downtime["availability_pct"], 2
+                ),
+            }
+            if downtime
+            else None
+        ),
         "period": f"{stats_all['date_start']} to {stats_all['date_end']}",
         "total_incidents": stats_all["count"],
         "incidents_per_week": round(stats_all["per_week"], 2),
@@ -223,18 +277,78 @@ SECTION_PROMPTS = {
     ),
 }
 
+# Per-mode section overrides. A value of None drops the section entirely.
+MODE_SECTION_OVERRIDES = {
+    "neutral": {},
+    "self": {
+        "executive_summary": (
+            "Write a single-paragraph executive summary (4-6 sentences) of "
+            "this internal audit of your company's public incident "
+            "communications, based on the data below. Lead with the most "
+            "consequential finding and the clearest opportunity to improve."
+            "\n\nDATA:\n{context}"
+        ),
+        "recommendations": (
+            "You are advising this company's own incident-communications "
+            "team. Below is their data plus threshold-triggered "
+            "recommendations. Refine and extend the list, ordered by "
+            "impact-vs-effort (quick wins first). Output a numbered list "
+            "where each item has a bold one-line recommendation, 1-3 "
+            "sentences of rationale tied to a specific number in the data, "
+            "and a concrete first step the team could take this week.\n\n"
+            "RULE-BASED RECOMMENDATIONS:\n{rules}\n\nDATA:\n{context}"
+        ),
+    },
+    "vendor": {
+        "executive_summary": (
+            "Write a single-paragraph executive summary (4-6 sentences) for "
+            "a team deciding whether to take a dependency on this company. "
+            "Answer: how reliable does the service look (especially any "
+            "focused components), is it improving or degrading, and how "
+            "honest and mature are its incident communications.\n\n"
+            "DATA:\n{context}"
+        ),
+        "recommendations": (
+            "You are helping a team evaluate this company as a potential "
+            "vendor. Based on the data and the observed risk signals below, "
+            "produce two parts: (1) a numbered list of concrete risks of "
+            "depending on this vendor, each tied to a specific number in the "
+            "data, ordered by severity; (2) a short bulleted list of "
+            "questions to ask the vendor in a procurement or security "
+            "review. Do NOT address advice to the vendor.\n\n"
+            "OBSERVED RISK SIGNALS:\n{rules}\n\nDATA:\n{context}"
+        ),
+        "templates": None,  # proposing templates to a vendor is pointless
+    },
+}
 
-def generate_sections(provider, model, context_json, rule_recommendations, progress=lambda m: None):
+
+def prompts_for_mode(mode):
+    """Section prompts for a report mode; None-valued sections are dropped."""
+    prompts = dict(SECTION_PROMPTS)
+    for name, override in MODE_SECTION_OVERRIDES.get(mode, {}).items():
+        if override is None:
+            prompts.pop(name, None)
+        else:
+            prompts[name] = override
+    return prompts
+
+
+def generate_sections(
+    provider, model, context_json, rule_recommendations,
+    progress=lambda m: None, mode="neutral",
+):
     """Generate all LLM report sections. Returns {section_name: markdown or None}."""
     sections = {}
     rules_text = "\n".join(f"- {r}" for r in rule_recommendations) or "(none triggered)"
-    for name, template in SECTION_PROMPTS.items():
+    system = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPT)
+    for name, template in prompts_for_mode(mode).items():
         progress(f"  Generating {name.replace('_', ' ')} via {provider}/{model}...")
         prompt = template.replace("{context}", context_json).replace(
             "{rules}", rules_text
         )
         try:
-            sections[name] = complete(provider, model, prompt)
+            sections[name] = complete(provider, model, prompt, system=system)
         except LLMError as e:
             progress(f"  ⚠ {name} failed: {e}")
             sections[name] = None

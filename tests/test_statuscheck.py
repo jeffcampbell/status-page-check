@@ -6,8 +6,10 @@ from datetime import datetime, timezone
 
 from statuscheck.analysis import (
     DEFAULT_COMPONENT_CATEGORIES,
+    analyze_transparency,
     classify_component,
     compute_stats,
+    filter_focus,
     split_periods,
 )
 from statuscheck.discover import is_feed_xml
@@ -18,7 +20,8 @@ from statuscheck.initcfg import (
     render_toml,
 )
 from statuscheck.jsonapi import parse_statuspage_json
-from statuscheck.lifecycle import analyze_lifecycle, fmt_minutes
+from statuscheck.lifecycle import analyze_lifecycle, disclosed_downtime, fmt_minutes
+from statuscheck.llm import prompts_for_mode
 from statuscheck.messaging import analyze_cadence, analyze_messaging
 from statuscheck.parser import (
     extract_affected_components,
@@ -265,6 +268,144 @@ class TestLifecycle(unittest.TestCase):
         self.assertEqual(fmt_minutes(60 * 28), "1d 4h")
 
 
+class TestFocusAndTransparency(unittest.TestCase):
+    def _incidents(self):
+        incidents = parse_feed_auto(RSS_INCIDENT_IO) + parse_feed_auto(ATOM_STATUSPAGE)
+        compute_stats(incidents, "t", DEFAULT_COMPONENT_CATEGORIES)  # assigns categories
+        return incidents
+
+    def test_filter_focus_by_component(self):
+        matched = filter_focus(self._incidents(), ["webhooks"])
+        self.assertEqual(len(matched), 1)
+        self.assertIn("webhook", matched[0]["title"].lower())
+
+    def test_filter_focus_by_title(self):
+        matched = filter_focus(self._incidents(), ["login"])
+        self.assertEqual([m["title"] for m in matched], ["Login delays"])
+
+    def test_filter_focus_empty_terms_passthrough(self):
+        incidents = self._incidents()
+        self.assertEqual(filter_focus(incidents, [" "]), incidents)
+
+    def test_transparency_never_above_minor(self):
+        base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        incidents = [
+            {"title": f"i{k}", "desc_raw": "x", "pub_date": base,
+             "created_at": base, "impact": "minor"}
+            for k in range(4)
+        ]
+        t = analyze_transparency(incidents)
+        self.assertTrue(t["never_above_minor"])
+        self.assertEqual(t["severity_coverage_pct"], 100)
+        self.assertEqual(t["major_count"], 0)
+
+    def test_transparency_backfill_detection(self):
+        base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        late = {
+            "title": "backfilled", "desc_raw": "x", "impact": "major",
+            "created_at": base, "pub_date": base.replace(day=3),  # posted 2 days late
+        }
+        ontime = {
+            "title": "prompt", "desc_raw": "root cause was found. postmortem to follow",
+            "impact": "major", "created_at": base, "pub_date": base,
+        }
+        t = analyze_transparency([late, ontime])
+        self.assertEqual(len(t["backfilled"]), 1)
+        self.assertEqual(t["backfilled"][0][0], "backfilled")
+        self.assertEqual(t["postmortem_rate_pct"], 50)
+
+
+class TestDisclosedDowntime(unittest.TestCase):
+    def _incident(self, day, hours, impact):
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc).replace(day=day)
+        return {
+            "title": "x", "desc_raw": "", "pub_date": base,
+            "created_at": base,
+            "resolved_at": base.replace(hour=hours),
+            "impact": impact,
+        }
+
+    def test_major_critical_basis(self):
+        # 40-day window (Jan 1 → Feb 10 via day arithmetic won't work; use two months)
+        incidents = [
+            self._incident(1, 12, "major"),    # 12h
+            self._incident(15, 6, "critical"), # 6h
+            self._incident(20, 10, "minor"),   # excluded from pool
+        ]
+        # stretch the window past 30 days
+        incidents.append(self._incident(1, 1, "minor"))
+        incidents[-1]["pub_date"] = incidents[-1]["pub_date"].replace(month=2, day=15)
+        incidents[-1]["created_at"] = incidents[-1]["pub_date"]
+        incidents[-1]["resolved_at"] = incidents[-1]["pub_date"].replace(hour=1)
+
+        d = disclosed_downtime(incidents)
+        self.assertEqual(d["basis"], "major/critical incidents")
+        self.assertEqual(d["incident_count"], 2)
+        self.assertEqual(d["total_minutes"], 18 * 60)
+        self.assertEqual(d["window_days"], 45)
+        self.assertLess(d["availability_pct"], 100)
+
+    def test_no_severity_falls_back_to_all(self):
+        incidents = [self._incident(1, 2, None), self._incident(15, 3, None)]
+        incidents.append(self._incident(1, 1, None))
+        incidents[-1]["pub_date"] = incidents[-1]["pub_date"].replace(month=3)
+        incidents[-1]["created_at"] = incidents[-1]["pub_date"]
+        incidents[-1]["resolved_at"] = incidents[-1]["pub_date"].replace(hour=1)
+        d = disclosed_downtime(incidents)
+        self.assertEqual(d["basis"], "all incidents with computable duration")
+        self.assertEqual(d["incident_count"], 3)
+
+    def test_short_window_returns_none(self):
+        self.assertIsNone(
+            disclosed_downtime([self._incident(1, 2, "major"), self._incident(2, 3, "major")])
+        )
+
+
+class TestModes(unittest.TestCase):
+    def test_vendor_prompts_drop_templates(self):
+        neutral = prompts_for_mode("neutral")
+        vendor = prompts_for_mode("vendor")
+        self.assertIn("templates", neutral)
+        self.assertNotIn("templates", vendor)
+        self.assertNotEqual(neutral["recommendations"], vendor["recommendations"])
+        self.assertIn("risks", vendor["recommendations"])
+
+    def _render(self, mode):
+        incidents = parse_feed_auto(RSS_INCIDENT_IO) + parse_feed_auto(ATOM_STATUSPAGE)
+        stats = compute_stats(incidents, "All data", DEFAULT_COMPONENT_CATEGORIES)
+        messaging = analyze_messaging(incidents)
+        cadence = analyze_cadence(incidents)
+        return render_report(
+            company="Acme",
+            stats_all=stats,
+            periods=[stats],
+            messaging=messaging,
+            period_messaging=[messaging],
+            cadence=cadence,
+            llm_sections={},
+            meta={"source_label": "test", "snapshots_used": 0},
+            transparency=analyze_transparency(incidents),
+            mode=mode,
+        )
+
+    def test_vendor_mode_report(self):
+        md = self._render("vendor")
+        self.assertIn("Vendor Reliability & Transparency Assessment", md)
+        self.assertIn("## 3. Risk Assessment & Questions for the Vendor", md)
+        self.assertNotIn("## 3. Recommendations", md)
+
+    def test_self_mode_report(self):
+        md = self._render("self")
+        self.assertIn("Internal Audit", md)
+        self.assertIn("### 2.8 Exhibits", md)
+        self.assertIn("## 3. Recommendations", md)
+
+    def test_neutral_mode_unchanged(self):
+        md = self._render("neutral")
+        self.assertIn("External Assessment", md)
+        self.assertNotIn("Exhibits", md)
+
+
 class TestHtmlOut(unittest.TestCase):
     MD = (
         "# Acme Report\n\n*Generated today.*\n\n## Summary\n\n"
@@ -406,7 +547,7 @@ class TestMessagingAndReport(unittest.TestCase):
                 "snapshots_used": 0,
             },
         )
-        self.assertIn("# Acme Incident Management", md)
+        self.assertIn("# Acme: Incident Management — External Assessment", md)
         self.assertIn("## Executive Summary", md)
         self.assertIn("## 3. Recommendations", md)
         self.assertIn("Appendix B", md)

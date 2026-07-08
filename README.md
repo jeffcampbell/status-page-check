@@ -11,14 +11,35 @@ The tool discovers the status page's data sources (Statuspage-compatible JSON AP
 - **Incident frequency & trends** — volume, rate, monthly distribution, period-over-period comparison
 - **Severity mix** — the page's own declared impact levels (critical/major/minor), when available
 - **Incident lifecycle** — median/p90 time to resolve, % resolved within 1/4/24 h, longest incidents, and the longest silences between updates during open incidents
+- **Disclosed downtime** — total major/critical degradation hours and implied disclosed availability
+- **Transparency signals** — postmortem rates, severity honesty, late-disclosure (backfill) detection
 - **Component analysis** — what breaks most, how that's shifting over time
 - **Failure modes** — delays vs errors vs outages
 - **Operational patterns** — day-of-week, hour-of-day coverage, same-day incident clustering
 - **Messaging quality** — template consistency, detail level, structure completeness, support-link hygiene, typos
 - **Automation signals** — manual vs scheduled posting, batch-posting detection
-- **Tone & sentiment assessment, recommendations, and proposed templates** — via an optional LLM (Anthropic, OpenAI, OpenRouter, or local Ollama)
+- **Tone & sentiment assessment, recommendations (or vendor risk analysis), and proposed templates** — via an optional LLM (Anthropic, OpenAI, OpenRouter, or local Ollama)
 
 All quantitative analysis is deterministic Python — reproducible from the same feed data, no AI required. The LLM is used only for the judgment calls code can't make: assessing tone, summarizing, and refining recommendations. Without an LLM configured, the report still generates with deterministic fallbacks (including rule-based recommendations).
+
+## Two ways to use it
+
+**Audit your own status page** (`--mode self`) — an internal working document for your incident/comms team: candid recommendations ordered by impact-vs-effort, the full (untruncated) list of quality issues and thin messages, an exhibits section with your weakest resolution messages for template rollout discussions, and proposed status-update templates.
+
+```bash
+statuscheck status.mycompany.com --mode self --llm anthropic --html
+```
+
+**Evaluate a potential vendor** (`--mode vendor`) — a due-diligence document for a team deciding whether to take a dependency: the executive summary answers "how risky is this?", section 3 becomes a risk assessment with suggested questions to ask the vendor in procurement review, and templates are dropped. Combine with `--focus` to restrict analysis to the components you'd actually depend on:
+
+```bash
+statuscheck vendor.com --mode vendor --focus "API, Webhooks" --html --open
+```
+
+Two vendor-oriented measurements ship in every report when the data supports them:
+
+- **Disclosed downtime** — total duration of major/critical incidents over the observed window, and the implied disclosed availability (e.g. "8 major/critical incidents totaled 14h 10m over 70 days ≈ 99.16%"). This is a *floor* on downtime: it counts only what the company published, and severity is self-declared.
+- **Transparency signals** — severity coverage, postmortem/root-cause rates on major incidents, whether the page has *ever* declared an incident above "minor", and incidents disclosed 24+ hours after their declared start (backfilling).
 
 ## Install
 
@@ -39,6 +60,10 @@ pip install -e .
 statuscheck acme.com
 statuscheck status.zapier.com
 statuscheck https://www.githubstatus.com/history.atom
+
+# Frame the report for your use case (see "Two ways to use it")
+statuscheck status.mycompany.com --mode self
+statuscheck vendor.com --mode vendor --focus "API, Webhooks"
 
 # Also render a shareable single-file HTML report, and open it
 statuscheck status.zapier.com --html --open

@@ -11,15 +11,26 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import __version__
-from .analysis import compute_stats, export_json, split_periods
+from .analysis import (
+    analyze_transparency,
+    compute_stats,
+    export_json,
+    filter_focus,
+    split_periods,
+)
 from .config import load_config
 from .discover import DiscoveryError, discover_source
-from .lifecycle import analyze_lifecycle
+from .lifecycle import analyze_lifecycle, disclosed_downtime
 from .llm import LLMError, build_context, generate_sections, resolve_provider
 from .messaging import analyze_cadence, analyze_messaging
 from .net import FetchError
 from .parser import extract_resolved_message, merge_incidents, parse_feed_auto
-from .report import build_comparison, render_report, rule_based_recommendations
+from .report import (
+    build_comparison,
+    render_report,
+    rule_based_recommendations,
+    rule_based_risk_notes,
+)
 from .wayback import fetch_history
 
 LLM_CHOICES = ["auto", "anthropic", "openai", "openrouter", "ollama", "none"]
@@ -66,6 +77,25 @@ def build_arg_parser():
     p.add_argument(
         "--config",
         help="Path to a TOML config with company-specific categories/patterns",
+    )
+    p.add_argument(
+        "--mode",
+        choices=["neutral", "self", "vendor"],
+        default="neutral",
+        help=(
+            "Report framing: 'self' for auditing your own status page "
+            "(direct recommendations, full exhibits), 'vendor' for evaluating "
+            "a potential dependency (risk assessment, questions to ask), "
+            "'neutral' for an external assessment (default)"
+        ),
+    )
+    p.add_argument(
+        "--focus",
+        help=(
+            "Comma-separated terms to restrict the analysis to the components "
+            "you care about (matched against titles, categories, and component "
+            "tags), e.g. --focus \"API, Webhooks\""
+        ),
     )
     p.add_argument(
         "--source",
@@ -217,6 +247,25 @@ def run(args):
         print("Error: no incidents had parseable dates.", file=sys.stderr)
         return 1
 
+    # ── Optional focus: restrict analysis to the components you depend on ──
+    overall_stats = None
+    if args.focus:
+        focused = filter_focus(incidents, args.focus.split(","))
+        if focused:
+            overall_stats = stats_all
+            incidents = focused
+            stats_all = compute_stats(incidents, "Focused incidents", categories)
+            print(
+                f"Focus '{args.focus}': {stats_all['count']}/{overall_stats['count']} "
+                "incidents match"
+            )
+        else:
+            print(
+                f"Warning: no incidents match focus '{args.focus}'; "
+                "analyzing everything.",
+                file=sys.stderr,
+            )
+
     split = split_periods(incidents)
     if split:
         (older, older_label), (newer, newer_label) = split
@@ -238,6 +287,9 @@ def run(args):
         print(
             f"Lifecycle timing available for {lifecycle['covered']}/{lifecycle['total']} incidents"
         )
+    transparency = analyze_transparency(incidents)
+    downtime = disclosed_downtime(incidents)
+    comparison = build_comparison(periods[0], periods[1]) if len(periods) == 2 else None
 
     # ── 4. Qualitative sections (optional LLM) ──
     llm_sections = {}
@@ -252,13 +304,20 @@ def run(args):
         provider, model = resolved
         llm_label = f"{provider}/{model}"
         print(f"Generating qualitative sections with {llm_label}...")
-        comparison = build_comparison(periods[0], periods[1]) if len(periods) == 2 else None
-        recs = rule_based_recommendations(messaging, cadence, comparison, lifecycle)
+        if args.mode == "vendor":
+            rules = rule_based_risk_notes(
+                messaging, cadence, comparison, lifecycle, transparency, downtime
+            )
+        else:
+            rules = rule_based_recommendations(messaging, cadence, comparison, lifecycle)
         samples = _sample_messages(incidents)
         context = build_context(
-            company, stats_all, messaging, cadence, comparison, samples, lifecycle
+            company, stats_all, messaging, cadence, comparison, samples,
+            lifecycle, transparency, downtime, focus_terms=args.focus,
         )
-        llm_sections = generate_sections(provider, model, context, recs, progress=_progress)
+        llm_sections = generate_sections(
+            provider, model, context, rules, progress=_progress, mode=args.mode
+        )
     elif args.llm == "auto":
         print(
             "No LLM configured (set ANTHROPIC_API_KEY / OPENAI_API_KEY / "
@@ -279,8 +338,13 @@ def run(args):
             "source_label": source_label,
             "snapshots_used": len(snapshots),
             "llm_label": llm_label,
+            "focus_terms": args.focus,
         },
         lifecycle=lifecycle,
+        transparency=transparency,
+        downtime=downtime,
+        mode=args.mode,
+        overall_stats=overall_stats,
     )
     report_path = out_dir / "report.md"
     report_path.write_text(report_md, encoding="utf-8")

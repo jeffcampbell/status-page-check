@@ -44,6 +44,22 @@ def _timed_updates(incident):
     )
 
 
+def duration_minutes(incident, ups=None):
+    """Duration of one incident in minutes, or None if not computable."""
+    if ups is None:
+        ups = _timed_updates(incident)
+    start = incident.get("created_at") or (ups[0]["at"] if ups else None)
+    end = incident.get("resolved_at")
+    if end is None and len(ups) >= 2 and ups[-1]["status"].lower() in RESOLVED_STATUSES:
+        end = ups[-1]["at"]
+    if not (start and end):
+        return None
+    minutes = (end - start).total_seconds() / 60
+    if not 0 <= minutes <= _SANITY_CAP_MINUTES:
+        return None
+    return minutes
+
+
 def analyze_lifecycle(incidents):
     """Compute duration and update-gap metrics. Returns a dict, or None
     when fewer than 3 incidents have usable timing data."""
@@ -52,20 +68,15 @@ def analyze_lifecycle(incidents):
     for i in incidents:
         ups = _timed_updates(i)
 
-        start = i.get("created_at") or (ups[0]["at"] if ups else None)
-        end = i.get("resolved_at")
-        if end is None and len(ups) >= 2 and ups[-1]["status"].lower() in RESOLVED_STATUSES:
-            end = ups[-1]["at"]
-        if start and end:
-            minutes = (end - start).total_seconds() / 60
-            if 0 <= minutes <= _SANITY_CAP_MINUTES:
-                durations.append(
-                    {
-                        "minutes": minutes,
-                        "title": i["title"],
-                        "date": i["pub_date"].strftime("%Y-%m-%d") if i["pub_date"] else "?",
-                    }
-                )
+        minutes = duration_minutes(i, ups)
+        if minutes is not None:
+            durations.append(
+                {
+                    "minutes": minutes,
+                    "title": i["title"],
+                    "date": i["pub_date"].strftime("%Y-%m-%d") if i["pub_date"] else "?",
+                }
+            )
 
         if len(ups) >= 2:
             gaps = [
@@ -105,4 +116,50 @@ def analyze_lifecycle(incidents):
         "gap_covered": len(max_gaps),
         "gap_median_minutes": median(max_gaps) if max_gaps else None,
         "gap_worst_minutes": max(max_gaps) if max_gaps else None,
+    }
+
+
+def disclosed_downtime(incidents, min_window_days=30):
+    """Estimate total disclosed downtime and implied availability.
+
+    Sums durations of major/critical incidents when severity data exists
+    (falling back to all duration-computable incidents otherwise) over the
+    window where that data is available. This measures what the company
+    *publishes*, not true availability — the report must carry that caveat.
+
+    Returns None when there's no usable timing data or the window is too
+    short to be meaningful.
+    """
+    timed = []
+    for i in incidents:
+        minutes = duration_minutes(i)
+        if minutes is not None:
+            timed.append((i, minutes))
+    if not timed:
+        return None
+
+    with_severity = [(i, m) for i, m in timed if i.get("impact")]
+    if with_severity:
+        pool = [(i, m) for i, m in with_severity if i["impact"] in ("critical", "major")]
+        window_set = with_severity  # availability window = where severity is known
+        basis = "major/critical incidents"
+    else:
+        pool = timed
+        window_set = timed
+        basis = "all incidents with computable duration"
+
+    dates = sorted(i["pub_date"] for i, _ in window_set if i["pub_date"])
+    if not dates:
+        return None
+    window_days = (dates[-1] - dates[0]).days
+    if window_days < min_window_days:
+        return None
+
+    total_minutes = sum(m for _, m in pool)
+    return {
+        "basis": basis,
+        "incident_count": len(pool),
+        "total_minutes": total_minutes,
+        "window_days": window_days,
+        "availability_pct": (1 - total_minutes / (window_days * 1440)) * 100,
     }

@@ -107,6 +107,86 @@ def compute_stats(incidents, label, categories):
     }
 
 
+def filter_focus(incidents, terms):
+    """Filter incidents to those matching focus terms (case-insensitive
+    substring) against the title, classified category, and component tags.
+
+    Used for vendor evaluation: "I only depend on their API and webhooks."
+    Call after compute_stats so categories are assigned.
+    """
+    terms = [t.strip().lower() for t in terms if t.strip()]
+    if not terms:
+        return incidents
+    matched = []
+    for i in incidents:
+        components = i.get("components") or extract_affected_components(i["desc_raw"])
+        haystack = " ".join([i.get("category") or "", i["title"], *components]).lower()
+        if any(t in haystack for t in terms):
+            matched.append(i)
+    return matched
+
+
+_POSTMORTEM_RE = re.compile(
+    r"(?i)post-?mortem|root cause analysis|detailed analysis|incident review|\brca\b"
+)
+_ROOT_CAUSE_RE = re.compile(r"(?i)root cause|caused by")
+
+# An incident posted this long after its declared start counts as backfilled
+_BACKFILL_THRESHOLD_HOURS = 24
+
+
+def analyze_transparency(incidents):
+    """Measure how forthcoming the page is: severity usage, postmortem and
+    root-cause rates, and late disclosure (backfilling). Facts only —
+    interpretation is left to the report/LLM."""
+    n = len(incidents)
+    if n == 0:
+        return None
+
+    with_severity = [i for i in incidents if i.get("impact")]
+    major = [i for i in with_severity if i["impact"] in ("critical", "major")]
+
+    # Postmortems matter most for major incidents; measure there when
+    # severity data exists, otherwise across everything
+    pm_basis, pm_label = (major, "major/critical incidents") if major else (
+        incidents, "all incidents"
+    )
+    postmortem_rate = (
+        sum(1 for i in pm_basis if _POSTMORTEM_RE.search(i["desc_raw"]))
+        / len(pm_basis) * 100
+    )
+
+    # Late disclosure: the incident was posted (pub_date) long after its
+    # declared start (created_at, backdatable on Statuspage). Only
+    # measurable for JSON-sourced incidents that carry both.
+    backfilled = []
+    backfill_measurable = 0
+    for i in incidents:
+        started, posted = i.get("created_at"), i.get("pub_date")
+        if started and posted:
+            backfill_measurable += 1
+            delay_h = (posted - started).total_seconds() / 3600
+            if delay_h >= _BACKFILL_THRESHOLD_HOURS:
+                backfilled.append((i["title"], delay_h))
+
+    return {
+        "count": n,
+        "severity_coverage_pct": len(with_severity) / n * 100,
+        "major_count": len(major),
+        "never_above_minor": bool(with_severity) and not major,
+        "postmortem_rate_pct": postmortem_rate,
+        "postmortem_basis": pm_label,
+        "root_cause_major_pct": (
+            sum(1 for i in major if _ROOT_CAUSE_RE.search(i["desc_raw"]))
+            / len(major) * 100
+            if major
+            else None
+        ),
+        "backfill_measurable": backfill_measurable,
+        "backfilled": sorted(backfilled, key=lambda b: -b[1]),
+    }
+
+
 def split_periods(incidents, min_span_days=360, min_per_period=4):
     """Split incidents at the midpoint of their date range for period comparison.
 

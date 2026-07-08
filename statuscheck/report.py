@@ -15,6 +15,18 @@ DOW_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
 
 SEVERITY_ORDER = ["critical", "major", "minor", "none", "maintenance"]
 
+MODE_TITLES = {
+    "neutral": "Incident Management — External Assessment",
+    "self": "Incident Communications — Internal Audit",
+    "vendor": "Vendor Reliability & Transparency Assessment",
+}
+
+MODE_SECTION3 = {
+    "neutral": "Recommendations",
+    "self": "Recommendations",
+    "vendor": "Risk Assessment & Questions for the Vendor",
+}
+
 
 def _bar(count, max_count, width=40):
     if max_count <= 0:
@@ -132,6 +144,79 @@ def rule_based_recommendations(messaging, cadence, comparison=None, lifecycle=No
     return recs
 
 
+def rule_based_risk_notes(
+    messaging, cadence, comparison=None, lifecycle=None,
+    transparency=None, downtime=None,
+):
+    """Vendor-mode counterpart to rule_based_recommendations: risk signals
+    addressed to a team evaluating this company as a dependency."""
+    notes = []
+
+    if comparison and comparison.get("rate_change_pct", 0) > 25:
+        notes.append(
+            f"The incident rate is rising: {comparison['rate_change_pct']:.0f}% "
+            f"increase between periods ({comparison['older_per_week']:.1f} → "
+            f"{comparison['newer_per_week']:.1f}/week)."
+        )
+
+    if downtime:
+        notes.append(
+            f"Disclosed downtime: {downtime['incident_count']} {downtime['basis']} "
+            f"totaled {fmt_minutes(downtime['total_minutes'])} over "
+            f"{downtime['window_days']} days (~{downtime['availability_pct']:.2f}% "
+            "implied disclosed availability). Actual availability may be lower — "
+            "this counts only what the company published."
+        )
+
+    if lifecycle:
+        if lifecycle["p90_minutes"] > 480:
+            notes.append(
+                f"Long-tail risk: 10% of incidents run longer than "
+                f"{fmt_minutes(lifecycle['p90_minutes'])} "
+                f"(worst: {fmt_minutes(lifecycle['max_minutes'])})."
+            )
+        gap = lifecycle.get("gap_median_minutes")
+        if gap and gap > 60:
+            notes.append(
+                f"Expect slow communication during incidents: the median longest "
+                f"silence between updates is {fmt_minutes(gap)}."
+            )
+
+    if transparency:
+        if transparency["never_above_minor"]:
+            notes.append(
+                "Severity skepticism warranted: despite declaring severity on "
+                f"{transparency['severity_coverage_pct']:.0f}% of incidents, this "
+                "page has never rated one above 'minor'."
+            )
+        if transparency["postmortem_rate_pct"] < 30:
+            notes.append(
+                f"Limited public accountability: only "
+                f"{transparency['postmortem_rate_pct']:.0f}% of "
+                f"{transparency['postmortem_basis']} reference a postmortem or "
+                "root-cause analysis."
+            )
+        if transparency["backfilled"]:
+            notes.append(
+                f"Late disclosure: {len(transparency['backfilled'])} incident(s) "
+                "were published 24+ hours after their declared start time."
+            )
+
+    structure = {s["check"]: s["pct"] for s in messaging["structure"]}
+    thin = [
+        name for name in ("Root cause mentioned", "Incident timeline included")
+        if structure.get(name, 100) < 40
+    ]
+    if thin:
+        notes.append(
+            "Resolution messages are often thin on specifics ("
+            + "; ".join(f"{name.lower()}: {structure[name]:.0f}%" for name in thin)
+            + ") — you may struggle to assess impact during their incidents."
+        )
+
+    return notes
+
+
 def build_comparison(stats_older, stats_newer):
     """Compute period-over-period deltas as a plain dict."""
     a, b = stats_older, stats_newer
@@ -178,22 +263,39 @@ def render_report(
     period_messaging, # list matching `periods`
     cadence,
     llm_sections,     # dict or {}
-    meta,             # source_label, snapshots_used, llm_label
+    meta,             # source_label, snapshots_used, llm_label, focus_terms
     lifecycle=None,   # from analyze_lifecycle, or None
+    transparency=None,  # from analyze_transparency, or None
+    downtime=None,    # from disclosed_downtime, or None
+    mode="neutral",   # neutral | self | vendor
+    overall_stats=None,  # unfocused stats for context when --focus is used
 ):
     comparison = build_comparison(periods[0], periods[1]) if len(periods) == 2 else None
-    recs = rule_based_recommendations(messaging, cadence, comparison, lifecycle)
+    if mode == "vendor":
+        recs = rule_based_risk_notes(
+            messaging, cadence, comparison, lifecycle, transparency, downtime
+        )
+    else:
+        recs = rule_based_recommendations(messaging, cadence, comparison, lifecycle)
     llm = llm_sections or {}
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     L = []
-    L.append(f"# {company} Incident Management: External Assessment")
+    L.append(f"# {company}: {MODE_TITLES.get(mode, MODE_TITLES['neutral'])}")
     L.append("")
     L.append(
         f"*Generated {generated} by [status-page-check]({REPO_URL}) "
         "from public status page data.*"
     )
     L.append("")
+    if meta.get("focus_terms"):
+        L.append(
+            f"> **Focus:** analysis restricted to incidents matching "
+            f"*{meta['focus_terms']}* — {stats_all['count']} of "
+            f"{overall_stats['count'] if overall_stats else '?'} total incidents. "
+            "Overall volume is shown for context in §1.1."
+        )
+        L.append("")
 
     # ── Executive summary ──
     L.append("## Executive Summary")
@@ -215,6 +317,15 @@ def render_report(
         )
         for p in ([stats_all] if len(periods) < 2 else periods)
     ]
+    if overall_stats:
+        rows.append(
+            (
+                "All incidents (context)",
+                f"{overall_stats['date_start']} → {overall_stats['date_end']}",
+                overall_stats["count"],
+                f"{overall_stats['per_week']:.1f}",
+            )
+        )
     L.extend(_table(["Period", "Dates", "Incidents", "Per week"], rows))
     if comparison:
         arrow = "▲" if comparison["rate_change_pct"] > 0 else "▼"
@@ -389,6 +500,23 @@ def render_report(
             "carries only final updates per incident, so durations can't be computed. "
             "(Statuspage-hosted pages expose timing via their JSON API and Atom feeds.)"
         )
+    if downtime:
+        L.append("")
+        L.append(
+            f"**Disclosed downtime:** {downtime['incident_count']} "
+            f"{downtime['basis']} totaled "
+            f"**{fmt_minutes(downtime['total_minutes'])}** of disclosed "
+            f"degradation over a {downtime['window_days']}-day window — an "
+            f"implied disclosed availability of "
+            f"**{downtime['availability_pct']:.2f}%**."
+        )
+        L.append("")
+        L.append(
+            "> This measures only what the company published: unreported or "
+            "under-scoped incidents aren't counted, and severity is "
+            "self-declared. Treat it as a floor on downtime, not a "
+            "measurement of availability."
+        )
     L.append("")
 
     # ── 2. Messaging analysis ──
@@ -446,12 +574,14 @@ def render_report(
     ]
     L.extend(_table(["Bucket", "Incidents", "%"], rows))
     if messaging["minimal_incidents"]:
+        # Internal audits get the full list; external reports stay compact
+        limit = len(messaging["minimal_incidents"]) if mode == "self" else 10
         L.append("")
         L.append("Minimally-detailed incidents (< 100 chars):")
         L.append("")
-        for title, text in messaging["minimal_incidents"][:10]:
+        for title, text in messaging["minimal_incidents"][:limit]:
             L.append(f'- **{title}** — "{text}"')
-        extra = len(messaging["minimal_incidents"]) - 10
+        extra = len(messaging["minimal_incidents"]) - limit
         if extra > 0:
             L.append(f"- *…and {extra} more*")
     L.append("")
@@ -517,18 +647,81 @@ def render_report(
     L.append("```")
     L.append("")
 
-    # ── 3. Recommendations ──
-    L.append("## 3. Recommendations")
+    if transparency:
+        L.append("### 2.7 Transparency Signals")
+        L.append("")
+        rows = [
+            (
+                "Severity declared",
+                f"{transparency['severity_coverage_pct']:.0f}% of incidents",
+            ),
+            ("Major/critical incidents declared", transparency["major_count"]),
+            (
+                f"Postmortem / RCA referenced ({transparency['postmortem_basis']})",
+                f"{transparency['postmortem_rate_pct']:.0f}%",
+            ),
+        ]
+        if transparency["root_cause_major_pct"] is not None:
+            rows.append(
+                (
+                    "Root cause mentioned (major/critical)",
+                    f"{transparency['root_cause_major_pct']:.0f}%",
+                )
+            )
+        if transparency["backfill_measurable"]:
+            rows.append(
+                (
+                    "Disclosed 24h+ after declared start",
+                    f"{len(transparency['backfilled'])} of "
+                    f"{transparency['backfill_measurable']} measurable",
+                )
+            )
+        L.extend(_table(["Signal", "Value"], rows))
+        if transparency["never_above_minor"]:
+            L.append("")
+            L.append(
+                "⚠ This page declares severity but has **never rated an incident "
+                "above 'minor'** in the analyzed window — declared severity may "
+                "understate impact."
+            )
+        if transparency["backfilled"]:
+            L.append("")
+            L.append("Incidents disclosed 24h+ after their declared start:")
+            L.append("")
+            for title, delay_h in transparency["backfilled"][:5]:
+                L.append(f"- {title} — {fmt_minutes(delay_h * 60)} late")
+        L.append("")
+
+    if mode == "self" and messaging.get("shortest_messages"):
+        L.append("### 2.8 Exhibits: Messages Needing Attention")
+        L.append("")
+        L.append(
+            "The thinnest resolution messages published in this window — "
+            "useful as before/after material when rolling out templates:"
+        )
+        L.append("")
+        for title, text in messaging["shortest_messages"]:
+            L.append(f'- **{title}** — "{text[:200]}"')
+        L.append("")
+
+    # ── 3. Recommendations / risk assessment ──
+    L.append(f"## 3. {MODE_SECTION3.get(mode, MODE_SECTION3['neutral'])}")
     L.append("")
     if llm.get("recommendations"):
         L.append(llm["recommendations"])
     elif recs:
         for i, rec in enumerate(recs, 1):
             L.append(f"{i}. {rec}")
+        if mode == "vendor":
+            L.append("")
+            L.append(
+                "*Run with an LLM provider configured for a fuller risk narrative "
+                "and suggested questions to ask this vendor.*"
+            )
     else:
         L.append(
-            "No threshold-based recommendations triggered — messaging consistency "
-            "and structure look solid across the analyzed incidents."
+            "No threshold-based findings triggered — incident volume, messaging "
+            "consistency, and structure look solid across the analyzed incidents."
         )
     L.append("")
 

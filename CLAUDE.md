@@ -22,7 +22,15 @@ statuscheck/
 └── net.py        # urllib GET/POST helpers
 ```
 
-Pipeline (see `cli.run`): discover source (JSON API + companion feed, merged) → fetch & merge Wayback snapshots of the feed → compute stats (+ midpoint period split if span ≥ 360 days) → messaging/cadence/lifecycle analysis → optional LLM sections → render `report.md` (+ `report.html` with `--html`) + `incidents.json` into `analyses/<company>/`.
+Pipeline (see `cli.run`): discover source (JSON API + companion feed, merged) → fetch & merge Wayback snapshots of the feed → compute stats (+ midpoint period split if span ≥ 360 days) → optional `--focus` filter → messaging/cadence/lifecycle/transparency/downtime analysis → optional LLM sections → render `report.md` (+ `report.html` with `--html`) + `incidents.json` into `analyses/<company>/`.
+
+## Report modes and focus
+
+`--mode neutral|self|vendor` changes *framing*, never facts: the title, the LLM system/section prompts (`llm.SYSTEM_PROMPTS` / `llm.MODE_SECTION_OVERRIDES`), section 3's heading and fallback (recommendations vs `report.rule_based_risk_notes`), self-mode extras (untruncated lists, §2.8 exhibits), and vendor mode dropping the templates section. Factual sections — transparency signals (§2.7), disclosed downtime (in §1.7) — render in **all** modes when data supports them; keep it that way.
+
+`--focus "API, Webhooks"` (see `analysis.filter_focus`) restricts the whole analysis to incidents matching the terms against title, classified category, and component tags — call it after `compute_stats` assigns categories. The unfocused stats are kept as a context row in §1.1.
+
+Disclosed downtime (`lifecycle.disclosed_downtime`) computes its availability window from incidents that *have severity data* — merged Wayback incidents usually don't, and using the full merged span would overstate availability. It is a floor on downtime, and the report must keep saying so.
 
 ## Design rules
 

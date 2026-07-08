@@ -167,9 +167,16 @@ def analyze_messaging(items, support_url_patterns=None):
                 (title, "Vague title — no component or impact specified")
             )
 
+    # Shortest resolution messages — exhibit material for internal audits
+    resolutions = [
+        (i["title"], extract_resolved_message(i["desc_raw"])) for i in items
+    ]
+    shortest_messages = sorted(resolutions, key=lambda t: len(t[1]))[:10]
+
     return {
         "count": total,
         "has_timeline": has_timeline,
+        "shortest_messages": shortest_messages,
         "updates_per_incident": (
             {
                 "min": min(update_counts),
