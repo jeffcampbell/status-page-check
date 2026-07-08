@@ -62,9 +62,15 @@ def compute_stats(incidents, label, categories):
     component_counts = Counter()
     keyword_counts = Counter()
     affected = Counter()
+    severity = Counter()
 
     for i in incidents:
-        cat = classify_component(i["title"], i["desc_raw"], categories)
+        # JSON-sourced incidents carry structured component tags that
+        # aren't in the description text — include them in classification
+        components = i.get("components") or extract_affected_components(i["desc_raw"])
+        cat = classify_component(
+            i["title"], i["desc_raw"] + " " + " ".join(components), categories
+        )
         component_counts[cat] += 1
         i["category"] = cat
         i["status"] = extract_status(i["desc_raw"])
@@ -78,8 +84,11 @@ def compute_stats(incidents, label, categories):
             if word in title_lower:
                 keyword_counts[word] += 1
 
-        for comp in extract_affected_components(i["desc_raw"]):
+        for comp in components:
             affected[comp] += 1
+
+        if i.get("impact"):
+            severity[i["impact"]] += 1
 
     return {
         "label": label,
@@ -93,6 +102,7 @@ def compute_stats(incidents, label, categories):
         "components": component_counts,
         "keywords": keyword_counts,
         "affected": affected,
+        "severity": severity,
         "incidents": incidents,
     }
 
@@ -139,6 +149,7 @@ def export_json(stats_list, output_path):
                 "date": i["pub_date"].isoformat() if i["pub_date"] else None,
                 "category": i.get("category"),
                 "status": i.get("status"),
+                "impact": i.get("impact"),
                 "link": i["link"],
             }
             for i in sorted_inc

@@ -144,13 +144,32 @@ def complete(provider, model, prompt, system=SYSTEM_PROMPT):
         raise LLMError(f"Unexpected response shape from {provider}: {e}")
 
 
-def build_context(company, stats_all, messaging, cadence, comparison, sample_messages):
+def build_context(
+    company, stats_all, messaging, cadence, comparison, sample_messages, lifecycle=None
+):
     """Assemble the compact JSON context shared by all LLM prompts."""
     ctx = {
         "company": company,
         "period": f"{stats_all['date_start']} to {stats_all['date_end']}",
         "total_incidents": stats_all["count"],
         "incidents_per_week": round(stats_all["per_week"], 2),
+        "severity_distribution": dict(stats_all.get("severity") or {}) or None,
+        "lifecycle": (
+            {
+                "coverage": f"{lifecycle['covered']}/{lifecycle['total']} incidents",
+                "median_resolve_minutes": round(lifecycle["median_minutes"]),
+                "p90_resolve_minutes": round(lifecycle["p90_minutes"]),
+                "max_resolve_minutes": round(lifecycle["max_minutes"]),
+                "pct_resolved_within_4h": round(lifecycle["within"]["4h"]),
+                "median_longest_gap_between_updates_minutes": (
+                    round(lifecycle["gap_median_minutes"])
+                    if lifecycle["gap_median_minutes"] is not None
+                    else None
+                ),
+            }
+            if lifecycle
+            else None
+        ),
         "top_components": stats_all["components"].most_common(8),
         "issue_keywords_in_titles": dict(stats_all["keywords"]),
         "structure_checks_pct": {

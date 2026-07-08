@@ -3,6 +3,7 @@
 import re
 from urllib.parse import urljoin, urlparse
 
+from .jsonapi import try_statuspage_api
 from .net import FetchError, http_get
 
 # Common feed paths by provider:
@@ -132,3 +133,58 @@ def discover_feed(target, progress=lambda msg: None):
         f"No RSS/Atom feed found for '{target}'. Tried: {', '.join(tried) or target}. "
         "If you know the feed URL, pass it directly (e.g. https://status.example.com/feed.rss)."
     )
+
+
+def discover_source(target, progress=lambda msg: None, prefer="auto"):
+    """Resolve a target to the best available incident source.
+
+    Prefers the Statuspage JSON API (declared severity, component tags,
+    timestamped update history) and falls back to RSS/Atom feed discovery.
+
+    Returns one of:
+        {"type": "json", "api_url", "page_url", "incidents", "raw", "feed_url"}
+        {"type": "feed", "feed_url", "xml"}
+
+    For JSON sources, feed_url is the companion Atom feed when one exists —
+    used for Wayback Machine history, which archives feeds far more often
+    than API endpoints.
+    """
+    target = target.strip().rstrip("/")
+    direct = target if "://" in target else "https://" + target
+
+    # An explicit feed URL bypasses API probing
+    if prefer != "json" and _looks_like_feed_url(direct):
+        feed_url, xml = discover_feed(target, progress)
+        return {"type": "feed", "feed_url": feed_url, "xml": xml}
+
+    if prefer in ("auto", "json"):
+        for base in _candidate_bases(target):
+            progress(f"Probing {base} for a Statuspage JSON API...")
+            api = try_statuspage_api(base)
+            if api:
+                progress(
+                    f"Found JSON API: {api['api_url']} "
+                    f"({len(api['incidents'])} incidents)"
+                )
+                # Also locate the companion feed: it often reaches further
+                # back than the API (and Wayback archives feeds, not APIs)
+                feed_url, feed_xml = None, None
+                try:
+                    feed_url, feed_xml = discover_feed(api["page_url"], progress)
+                except (DiscoveryError, FetchError):
+                    pass
+                return {
+                    "type": "json",
+                    "feed_url": feed_url,
+                    "feed_xml": feed_xml,
+                    **api,
+                }
+        if prefer == "json":
+            raise DiscoveryError(
+                f"No Statuspage JSON API found for '{target}' (tried "
+                "/api/v2/incidents.json on candidate hosts). Try --source feed."
+            )
+        progress("No Statuspage JSON API found; falling back to feed discovery.")
+
+    feed_url, xml = discover_feed(target, progress)
+    return {"type": "feed", "feed_url": feed_url, "xml": xml}

@@ -9,8 +9,11 @@ fallback so the report is complete without any LLM.
 from datetime import datetime, timezone
 
 from . import REPO_URL
+from .lifecycle import DURATION_BUCKETS, fmt_minutes
 
 DOW_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+SEVERITY_ORDER = ["critical", "major", "minor", "none", "maintenance"]
 
 
 def _bar(count, max_count, width=40):
@@ -20,16 +23,19 @@ def _bar(count, max_count, width=40):
 
 
 def _table(headers, rows):
+    def cell(c):
+        return str(c).replace("|", "\\|")
+
     lines = [
-        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(cell(h) for h in headers) + " |",
         "| " + " | ".join("---" for _ in headers) + " |",
     ]
     for row in rows:
-        lines.append("| " + " | ".join(str(c) for c in row) + " |")
+        lines.append("| " + " | ".join(cell(c) for c in row) + " |")
     return lines
 
 
-def rule_based_recommendations(messaging, cadence, comparison=None):
+def rule_based_recommendations(messaging, cadence, comparison=None, lifecycle=None):
     """Generate recommendations from data thresholds. Pure code, no LLM."""
     recs = []
     total = messaging["count"]
@@ -107,6 +113,22 @@ def rule_based_recommendations(messaging, cadence, comparison=None):
             "worth a capacity and release-process review."
         )
 
+    if lifecycle:
+        gap = lifecycle.get("gap_median_minutes")
+        if gap and gap > 60:
+            recs.append(
+                f"Commit to a public update cadence: during open incidents the median "
+                f"longest silence between updates is {fmt_minutes(gap)} "
+                f"(worst: {fmt_minutes(lifecycle['gap_worst_minutes'])}). A stated "
+                "'next update by' time keeps customers from refreshing in the dark."
+            )
+        if lifecycle["p90_minutes"] > 1440:
+            recs.append(
+                f"Review escalation for long-running incidents: 10% of incidents run "
+                f"longer than {fmt_minutes(lifecycle['p90_minutes'])} (max "
+                f"{fmt_minutes(lifecycle['max_minutes'])})."
+            )
+
     return recs
 
 
@@ -156,10 +178,11 @@ def render_report(
     period_messaging, # list matching `periods`
     cadence,
     llm_sections,     # dict or {}
-    meta,             # feed_url, snapshots_used, llm_label
+    meta,             # source_label, snapshots_used, llm_label
+    lifecycle=None,   # from analyze_lifecycle, or None
 ):
     comparison = build_comparison(periods[0], periods[1]) if len(periods) == 2 else None
-    recs = rule_based_recommendations(messaging, cadence, comparison)
+    recs = rule_based_recommendations(messaging, cadence, comparison, lifecycle)
     llm = llm_sections or {}
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -199,6 +222,23 @@ def render_report(
         L.append(
             f"Rate change between periods: {arrow} "
             f"**{abs(comparison['rate_change_pct']):.0f}%**"
+        )
+    if stats_all.get("severity"):
+        sev = stats_all["severity"]
+        L.append("")
+        L.append("Declared severity (the page's own impact levels):")
+        L.append("")
+        ordered = [s for s in SEVERITY_ORDER if s in sev] + [
+            s for s in sev if s not in SEVERITY_ORDER
+        ]
+        L.extend(
+            _table(
+                ["Impact", "Incidents", "%"],
+                [
+                    (s, sev[s], f"{sev[s] / stats_all['count'] * 100:.0f}%")
+                    for s in ordered
+                ],
+            )
         )
     L.append("")
 
@@ -300,6 +340,55 @@ def render_report(
             L.append("None — same-day incidents were spaced apart.")
     else:
         L.append("No days with multiple incidents.")
+    L.append("")
+
+    L.append("### 1.7 Incident Duration & Lifecycle")
+    L.append("")
+    if lifecycle:
+        L.append(
+            f"Duration computable for {lifecycle['covered']}/{lifecycle['total']} "
+            "incidents (those with usable start/resolve timing)."
+        )
+        L.append("")
+        L.extend(
+            _table(
+                ["Metric", "Value"],
+                [
+                    ("Median time to resolve", fmt_minutes(lifecycle["median_minutes"])),
+                    ("90th percentile", fmt_minutes(lifecycle["p90_minutes"])),
+                    ("Longest incident", fmt_minutes(lifecycle["max_minutes"])),
+                    ("Resolved within 1 h", f"{lifecycle['within']['1h']:.0f}%"),
+                    ("Resolved within 4 h", f"{lifecycle['within']['4h']:.0f}%"),
+                    ("Resolved within 24 h", f"{lifecycle['within']['24h']:.0f}%"),
+                ],
+            )
+        )
+        L.append("")
+        L.append("```")
+        max_b = max(lifecycle["buckets"].values(), default=0)
+        for label, _ in DURATION_BUCKETS:
+            c = lifecycle["buckets"][label]
+            L.append(f"{label:<14} {c:>3}  {_bar(c, max_b)}")
+        L.append("```")
+        L.append("")
+        L.append("Longest incidents:")
+        L.append("")
+        for d in lifecycle["longest"]:
+            L.append(f"- **{fmt_minutes(d['minutes'])}** — {d['title']} ({d['date']})")
+        if lifecycle["gap_median_minutes"] is not None:
+            L.append("")
+            L.append(
+                f"Update cadence during incidents ({lifecycle['gap_covered']} incidents "
+                f"with 2+ updates): the median longest silence between consecutive "
+                f"updates is **{fmt_minutes(lifecycle['gap_median_minutes'])}** "
+                f"(worst: {fmt_minutes(lifecycle['gap_worst_minutes'])})."
+            )
+    else:
+        L.append(
+            "No per-update timing data is available from this source — the feed "
+            "carries only final updates per incident, so durations can't be computed. "
+            "(Statuspage-hosted pages expose timing via their JSON API and Atom feeds.)"
+        )
     L.append("")
 
     # ── 2. Messaging analysis ──
@@ -453,11 +542,11 @@ def render_report(
     # ── Appendix B: methodology ──
     L.append("## Appendix B: Data Sources & Methodology")
     L.append("")
-    L.append(f"- **Feed:** {meta['feed_url']}")
+    L.append(f"- **Source:** {meta['source_label']}")
     if meta.get("snapshots_used"):
         L.append(
             f"- **Historical data:** {meta['snapshots_used']} Wayback Machine "
-            "snapshot(s) of the same feed, merged and deduplicated with the live feed"
+            "snapshot(s) of the page's feed, merged and deduplicated with the live data"
         )
     L.append(
         f"- **Incidents analyzed:** {stats_all['count']} "

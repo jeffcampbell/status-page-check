@@ -3,7 +3,7 @@
 import html
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
 
@@ -118,10 +118,15 @@ def parse_feed_auto(xml_text):
 
 
 def incident_key(incident):
-    """Stable identity for deduplicating an incident across feed snapshots."""
+    """Stable identity for deduplicating an incident across sources.
+
+    Doubled slashes are collapsed: incident.io RSS links look like
+    host//incidents/<id> while the same incident via the JSON API is
+    host/incidents/<id>.
+    """
     ident = incident.get("link") or incident.get("guid")
     if ident:
-        return ident.rstrip("/")
+        return re.sub(r"(?<!:)/{2,}", "/", ident).rstrip("/")
     date = incident["pub_date"].date().isoformat() if incident["pub_date"] else "?"
     return f"{incident['title'].lower().strip()}|{date}"
 
@@ -186,6 +191,69 @@ def extract_updates(desc_raw):
                 "message": _strip_html(message).strip(),
             }
         )
+    return updates
+
+
+_MONTHS = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+
+# Timezone abbreviations Statuspage commonly displays; unknown ones are
+# skipped rather than guessed
+_TZ_OFFSETS = {
+    "UTC": 0, "GMT": 0,
+    "PST": -8, "PDT": -7, "MST": -7, "MDT": -6,
+    "CST": -6, "CDT": -5, "EST": -5, "EDT": -4,
+    "BST": 1, "CET": 1, "CEST": 2, "AEST": 10, "AEDT": 11,
+}
+
+_TIMED_UPDATE_RE = re.compile(
+    r"<small>\s*([A-Z][a-z]{2})\s*(\d{1,2}),\s*(\d{1,2}):(\d{2})\s*([A-Z]{3,5})\s*</small>"
+    r"\s*(?:<br\s*/?>)?\s*<strong>(.*?)</strong>\s*-\s*(.*?)(?=</p>|$)",
+    re.DOTALL,
+)
+
+
+def extract_timed_updates(desc_raw, ref_date):
+    """Extract status updates with timestamps from Statuspage description HTML.
+
+    Statuspage embeds each update as:
+        <p><small>Jul <var> 7</var>, <var>16:17</var> UTC</small><br>
+        <strong>Resolved</strong> - message</p>
+
+    The timestamps carry no year, so it's inferred from ref_date (the
+    item's publish date): any update that would land after ref_date must
+    belong to the previous year. Returns updates sorted oldest-first;
+    empty list if timestamps are missing or the timezone is unrecognized.
+    """
+    if not ref_date:
+        return []
+    if ref_date.tzinfo is None:
+        ref_date = ref_date.replace(tzinfo=timezone.utc)
+
+    text = re.sub(r"</?var[^>]*>", "", desc_raw)
+    updates = []
+    for mon, day, hh, mm, tz, status, message in _TIMED_UPDATE_RE.findall(text):
+        if mon not in _MONTHS or tz not in _TZ_OFFSETS:
+            continue
+        tzinfo = timezone(timedelta(hours=_TZ_OFFSETS[tz]))
+        try:
+            at = datetime(
+                ref_date.year, _MONTHS[mon], int(day), int(hh), int(mm), tzinfo=tzinfo
+            )
+            if at > ref_date + timedelta(days=2):
+                at = at.replace(year=at.year - 1)
+        except ValueError:
+            continue
+        updates.append(
+            {
+                "status": status.strip(),
+                "message": _strip_html(message).strip(),
+                "at": at,
+            }
+        )
+    updates.sort(key=lambda u: u["at"])
     return updates
 
 
