@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "status-page-check"
+version = "0.1.0"
+description = "Analyze any company's public status page and produce an incident-communication and reliability report"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Jeffery Campbell" }]
+keywords = ["status-page", "incidents", "reliability", "sre", "incident-communication", "rss"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Monitoring",
+]
+
+[project.urls]
+Homepage = "https://github.com/jeffcampbell/status-page-check"
+
+[project.scripts]
+statuscheck = "statuscheck.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["statuscheck*"]

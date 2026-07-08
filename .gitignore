@@ -1,0 +1,24 @@
+# Analysis outputs (reports, raw feeds, exported data are per-user artifacts)
+analyses/
+
+# Raw feed data anywhere else
+*.rss
+*.atom
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# OS
+.DS_Store
+
+# IDE / local tool state
+.vscode/
+.idea/
+.claude/settings.local.json

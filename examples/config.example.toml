@@ -1,0 +1,37 @@
+# Example per-company configuration for status-page-check.
+#
+# Everything is optional — the tool works with built-in defaults. A config
+# improves component classification and support-link detection for a
+# specific company.
+#
+# Usage:
+#   statuscheck status.acme.com --config acme.toml
+
+# Display name used in the report title (default: derived from the domain)
+company = "Acme"
+
+# Explicit feed URL — skips autodiscovery (default: discovered from the target)
+# feed_url = "https://status.acme.com/feed.rss"
+
+# Regex patterns matching the company's support/help URLs. Used to check
+# whether incident messages include a support link.
+support_url_patterns = [
+    'acme\.com/support',
+    'support\.acme\.com',
+    'acme\.com/help',
+]
+
+# Component taxonomy: category name → keywords matched (on word boundaries,
+# case-insensitively) against incident title + description.
+#
+# Tip: run once with defaults, look at what lands in "Other" in the report,
+# then add categories/keywords for the company's actual product areas.
+[categories]
+"Core Product" = ["workflow", "automation", "run", "task"]
+"API" = ["api", "endpoint", "rest", "graphql", "rate limit"]
+"Authentication" = ["auth", "login", "sso", "oauth", "saml", "mfa"]
+"Dashboard / UI" = ["dashboard", "ui", "console", "portal", "editor"]
+"AI Features" = ["ai", "copilot", "assistant", "llm"]
+"Infrastructure" = ["infrastructure", "deploy", "dns", "cdn", "network", "latency"]
+"Integrations" = ["webhook", "integration", "connector", "third-party"]
+"Billing" = ["billing", "payment", "invoice", "subscription", "checkout"]
