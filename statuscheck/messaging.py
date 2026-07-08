@@ -10,7 +10,7 @@ from collections import Counter, defaultdict
 from .parser import extract_resolved_message, extract_updates
 
 DEFAULT_SUPPORT_PATTERNS = [
-    r"(?i)https?://[^\s<\"]*(?:support|help|contact|get-help)",
+    r"https?://[^\s<\"]*(?:support|help|contact|get-help)",
 ]
 
 # Common misspellings seen in status page communications
@@ -60,7 +60,17 @@ OPENER_BUCKETS = [
 
 
 def _support_regex(support_url_patterns):
-    return "|".join(support_url_patterns or DEFAULT_SUPPORT_PATTERNS)
+    """Compile support-URL patterns into one case-insensitive regex.
+
+    Patterns are wrapped in non-capturing groups so alternation composes
+    safely; a leading (?i) is stripped because Python 3.11+ rejects global
+    flags that aren't at the very start of a pattern.
+    """
+    patterns = [
+        p.removeprefix("(?i)")
+        for p in (support_url_patterns or DEFAULT_SUPPORT_PATTERNS)
+    ]
+    return re.compile("|".join(f"(?:{p})" for p in patterns), re.IGNORECASE)
 
 
 def analyze_messaging(items, support_url_patterns=None):
@@ -101,7 +111,7 @@ def analyze_messaging(items, support_url_patterns=None):
     for name, pattern in STRUCTURE_CHECKS:
         count = sum(1 for i in items if re.search(pattern, i["desc_raw"]))
         structure.append({"check": name, "count": count, "pct": count / total * 100})
-    support_count = sum(1 for i in items if re.search(support_regex, i["desc_raw"]))
+    support_count = sum(1 for i in items if support_regex.search(i["desc_raw"]))
     structure.insert(
         1,
         {
@@ -127,10 +137,10 @@ def analyze_messaging(items, support_url_patterns=None):
     for i in items:
         for link in re.findall(r"https?://[^\s<\"]+", i["desc_raw"]):
             link = link.rstrip(".),;")
-            if re.search(support_regex, link):
+            if support_regex.search(link):
                 link_variants[link] += 1
     no_support_link = [
-        i["title"] for i in items if not re.search(support_regex, i["desc_raw"])
+        i["title"] for i in items if not support_regex.search(i["desc_raw"])
     ]
 
     # ── Quality issues ──

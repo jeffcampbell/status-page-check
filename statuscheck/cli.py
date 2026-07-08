@@ -45,7 +45,11 @@ def build_arg_parser():
     )
     p.add_argument(
         "target",
-        help="Status page URL, feed URL, or domain (e.g. status.acme.com or acme.com)",
+        nargs="?",
+        help=(
+            "Status page URL, feed URL, or domain (e.g. status.acme.com or "
+            "acme.com). Optional if --config sets feed_url."
+        ),
     )
     p.add_argument(
         "-o", "--output",
@@ -86,7 +90,15 @@ def run(args):
     config = load_config(args.config)
 
     # ── 1. Discover and fetch the live feed ──
-    target = config["feed_url"] or args.target
+    # An explicit CLI target beats the config's feed_url
+    target = args.target or config["feed_url"]
+    if not target:
+        print(
+            "Error: no target given. Pass a status page URL/domain, or set "
+            "feed_url in the config file.",
+            file=sys.stderr,
+        )
+        return 1
     try:
         feed_url, xml_current = discover_feed(target, progress=_progress)
     except (DiscoveryError, FetchError) as e:
@@ -103,7 +115,7 @@ def run(args):
     out_dir = Path(args.output or Path("analyses") / _slug(feed_url))
     raw_dir = out_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
-    (raw_dir / "current.xml").write_text(xml_current)
+    (raw_dir / "current.xml").write_text(xml_current, encoding="utf-8")
 
     # ── 2. Wayback Machine history ──
     snapshots = []
@@ -112,7 +124,7 @@ def run(args):
             feed_url, max_snapshots=args.max_snapshots, progress=_progress
         )
         for ts, xml in snapshots:
-            (raw_dir / f"wayback_{ts}.xml").write_text(xml)
+            (raw_dir / f"wayback_{ts}.xml").write_text(xml, encoding="utf-8")
 
     # Merge: live feed first, then snapshots newest→oldest, so the most
     # recent version of a duplicated incident wins.
@@ -192,7 +204,7 @@ def run(args):
         },
     )
     report_path = out_dir / "report.md"
-    report_path.write_text(report_md)
+    report_path.write_text(report_md, encoding="utf-8")
     export_json(periods if len(periods) == 2 else [stats_all], out_dir / "incidents.json")
 
     print()
@@ -225,6 +237,12 @@ def _sample_messages(incidents, max_samples=25, max_chars=400):
 
 
 def main(argv=None):
+    # Reports and progress output use ✔/█/→; don't crash on consoles with
+    # legacy encodings (e.g. cp1252 on Windows)
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
     args = build_arg_parser().parse_args(argv)
     try:
         return run(args)

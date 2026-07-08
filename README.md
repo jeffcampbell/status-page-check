@@ -73,7 +73,7 @@ By default (`--llm auto`) the tool uses the first available provider, or skips L
 | Provider | Setup | Default model |
 |----------|-------|---------------|
 | `anthropic` | `export ANTHROPIC_API_KEY=...` | `claude-sonnet-4-6` |
-| `openai` | `export OPENAI_API_KEY=...` | `gpt-4o-mini` |
+| `openai` | `export OPENAI_API_KEY=...` | `gpt-4.1-mini` |
 | `openrouter` | `export OPENROUTER_API_KEY=...` | `anthropic/claude-sonnet-4.5` |
 | `ollama` | run Ollama locally (`OLLAMA_HOST` to override the default `http://localhost:11434`) | `llama3.1` |
 

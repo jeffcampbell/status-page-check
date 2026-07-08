@@ -166,6 +166,16 @@ class TestMessagingAndReport(unittest.TestCase):
             any("terse" in issue for _, issue in messaging["quality_issues"])
         )
 
+    def test_custom_support_patterns_compose_case_insensitively(self):
+        incidents = parse_feed_auto(RSS_INCIDENT_IO)
+        # Multiple patterns (one with a legacy (?i) prefix) must not raise on
+        # Python 3.11+ and must match case-insensitively
+        messaging = analyze_messaging(
+            incidents, [r"(?i)ACME\.com/support", r"support\.acme\.com"]
+        )
+        checks = {s["check"]: s for s in messaging["structure"]}
+        self.assertEqual(checks["Support link included"]["count"], 1)
+
     def test_analyze_cadence(self):
         _, _, cadence = self._build()
         self.assertEqual(cadence["dated_count"], 3)

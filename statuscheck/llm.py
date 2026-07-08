@@ -22,7 +22,7 @@ from .net import FetchError, http_post_json
 
 DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-4-6",
-    "openai": "gpt-4o-mini",
+    "openai": "gpt-4.1-mini",
     "openrouter": "anthropic/claude-sonnet-4.5",
     "ollama": "llama3.1",
 }

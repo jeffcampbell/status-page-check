@@ -34,9 +34,7 @@ class DiscoveryError(Exception):
 
 def is_feed_xml(text):
     """Heuristic: does this text look like an RSS or Atom feed?"""
-    head = text[:2000].lstrip()
-    if head.startswith("﻿"):
-        head = head[1:].lstrip()
+    head = text[:2000]
     return "<rss" in head or "<feed" in head
 
 

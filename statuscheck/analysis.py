@@ -143,5 +143,5 @@ def export_json(stats_list, output_path):
             }
             for i in sorted_inc
         ]
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(export, f, indent=2)

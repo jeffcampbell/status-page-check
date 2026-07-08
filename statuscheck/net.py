@@ -5,7 +5,9 @@ import time
 import urllib.error
 import urllib.request
 
-USER_AGENT = "Mozilla/5.0 (compatible; status-page-check/0.1; +https://github.com/jeffcampbell/status-page-check)"
+from . import REPO_URL, __version__
+
+USER_AGENT = f"Mozilla/5.0 (compatible; status-page-check/{__version__}; +{REPO_URL})"
 
 
 class FetchError(Exception):

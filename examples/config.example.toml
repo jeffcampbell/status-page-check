@@ -10,7 +10,8 @@
 # Display name used in the report title (default: derived from the domain)
 company = "Acme"
 
-# Explicit feed URL — skips autodiscovery (default: discovered from the target)
+# Explicit feed URL — skips autodiscovery and makes the CLI target optional.
+# A target passed on the command line takes precedence over this.
 # feed_url = "https://status.acme.com/feed.rss"
 
 # Regex patterns matching the company's support/help URLs. Used to check

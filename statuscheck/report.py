@@ -8,6 +8,8 @@ fallback so the report is complete without any LLM.
 
 from datetime import datetime, timezone
 
+from . import REPO_URL
+
 DOW_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 
@@ -54,7 +56,7 @@ def rule_based_recommendations(messaging, cadence, comparison=None):
             f"currently {structure['Customer action steps']:.0f}%."
         )
 
-    minimal = messaging["length_buckets"].get("< 100 chars (minimal)", 0)
+    minimal = len(messaging["minimal_incidents"])
     if minimal / total > 0.10:
         recs.append(
             f"Set a minimum content standard for resolutions: {minimal}/{total} incidents "
@@ -154,7 +156,7 @@ def render_report(
     period_messaging, # list matching `periods`
     cadence,
     llm_sections,     # dict or {}
-    meta,             # feed_url, snapshots_used, llm_label, feed_has_timeline
+    meta,             # feed_url, snapshots_used, llm_label
 ):
     comparison = build_comparison(periods[0], periods[1]) if len(periods) == 2 else None
     recs = rule_based_recommendations(messaging, cadence, comparison)
@@ -165,8 +167,8 @@ def render_report(
     L.append(f"# {company} Incident Management: External Assessment")
     L.append("")
     L.append(
-        f"*Generated {generated} by [status-page-check]"
-        f"(https://github.com/jeffcampbell/status-page-check) from public status page data.*"
+        f"*Generated {generated} by [status-page-check]({REPO_URL}) "
+        "from public status page data.*"
     )
     L.append("")
 
