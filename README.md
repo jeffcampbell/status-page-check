@@ -71,6 +71,9 @@ statuscheck status.zapier.com --html --open
 # Skip the Wayback Machine (live data only, faster)
 statuscheck status.zapier.com --no-archive
 
+# Force a specific data source if autodetection picks wrong
+statuscheck acme.com --source feed          # or: --source json
+
 # Pick an LLM provider explicitly
 statuscheck status.zapier.com --llm anthropic
 statuscheck status.zapier.com --llm ollama --model llama3.1

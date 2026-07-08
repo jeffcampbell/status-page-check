@@ -57,6 +57,8 @@ def build_arg_parser():
             "Examples:\n"
             "  statuscheck status.zapier.com\n"
             "  statuscheck www.githubstatus.com --html --open\n"
+            "  statuscheck status.mycompany.com --mode self       # audit your own page\n"
+            '  statuscheck acme.com --mode vendor --focus "API"   # vendor due diligence\n'
             "  statuscheck acme.com --llm ollama --model llama3.1 -o reports/acme\n"
             "  statuscheck init acme.com          # generate a starter config\n"
         ),
@@ -249,9 +251,11 @@ def run(args):
 
     # ── Optional focus: restrict analysis to the components you depend on ──
     overall_stats = None
+    applied_focus = None
     if args.focus:
         focused = filter_focus(incidents, args.focus.split(","))
         if focused:
+            applied_focus = args.focus
             overall_stats = stats_all
             incidents = focused
             stats_all = compute_stats(incidents, "Focused incidents", categories)
@@ -313,7 +317,7 @@ def run(args):
         samples = _sample_messages(incidents)
         context = build_context(
             company, stats_all, messaging, cadence, comparison, samples,
-            lifecycle, transparency, downtime, focus_terms=args.focus,
+            lifecycle, transparency, downtime, focus_terms=applied_focus,
         )
         llm_sections = generate_sections(
             provider, model, context, rules, progress=_progress, mode=args.mode
@@ -338,7 +342,7 @@ def run(args):
             "source_label": source_label,
             "snapshots_used": len(snapshots),
             "llm_label": llm_label,
-            "focus_terms": args.focus,
+            "focus_terms": applied_focus,
         },
         lifecycle=lifecycle,
         transparency=transparency,
@@ -357,10 +361,11 @@ def run(args):
 
     if args.html or args.open:
         from .htmlout import render_html
+        from .report import MODE_TITLES
 
         html_path = out_dir / "report.html"
         html_path.write_text(
-            render_html(report_md, title=f"{company} Incident Assessment"),
+            render_html(report_md, title=f"{company}: {MODE_TITLES[args.mode]}"),
             encoding="utf-8",
         )
         print(f"✔ HTML:      {html_path}")

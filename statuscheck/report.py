@@ -525,12 +525,12 @@ def render_report(
     if messaging["has_timeline"]:
         u = messaging["updates_per_incident"]
         L.append(
-            f"The feed includes the full update timeline per incident "
+            f"The source includes the full update timeline per incident "
             f"(min {u['min']}, max {u['max']}, avg {u['avg']:.1f} updates/incident)."
         )
     else:
         L.append(
-            "> **Caveat:** this feed contains only the *final* update per incident "
+            "> **Caveat:** this source contains only the *final* update per incident "
             "(usually the Resolved message). This section analyzes resolution "
             "communications, not the full incident lifecycle."
         )
@@ -747,7 +747,7 @@ def render_report(
     )
     L.append(
         f"- **Quantitative analysis:** deterministic Python (parsing, classification, "
-        "counting, regex checks) — reproducible from the same feed data"
+        "counting, regex checks) — reproducible from the same source data"
     )
     L.append(
         f"- **Qualitative sections:** {meta.get('llm_label') or 'no LLM used (deterministic fallbacks shown)'}"
@@ -756,11 +756,16 @@ def render_report(
         "- **Limitations:** analysis reflects only what the company publishes; "
         "component classification is keyword-based; "
         + (
-            "the feed carries full incident timelines."
+            "the source carries full incident timelines."
             if messaging["has_timeline"]
-            else "the feed carries only final updates per incident."
+            else "the source carries only final updates per incident."
         )
     )
+    if meta.get("focus_terms"):
+        L.append(
+            f"- **Focus filter:** incidents matching *{meta['focus_terms']}* "
+            "(title, category, or component tags)"
+        )
     L.append("")
 
     return "\n".join(L)

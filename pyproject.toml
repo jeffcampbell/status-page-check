@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "status-page-check"
-version = "0.1.0"
+version = "0.2.0"
 description = "Analyze any company's public status page and produce an incident-communication and reliability report"
 readme = "README.md"
 requires-python = ">=3.11"
