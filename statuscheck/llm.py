@@ -7,15 +7,20 @@ judgment calls that code can't make well:
   - refining rule-based recommendations
   - proposing status-update templates
 
-Providers (no SDKs — raw HTTP via urllib):
+Providers (no SDKs — raw HTTP via urllib, or a local subprocess):
   anthropic   Anthropic Messages API        needs ANTHROPIC_API_KEY
   openai      OpenAI chat completions       needs OPENAI_API_KEY
   openrouter  OpenRouter (OpenAI-compatible) needs OPENROUTER_API_KEY
   ollama      Local Ollama (OpenAI-compatible) needs a running Ollama server
+  claude-cli  Local `claude` CLI (`claude -p`) — uses the user's Claude Code
+              plan / OAuth session, no API key. Text in on stdin, text out.
 """
 
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 import urllib.request
 
 from .net import FetchError, http_post_json
@@ -25,6 +30,7 @@ DEFAULT_MODELS = {
     "openai": "gpt-4.1-mini",
     "openrouter": "anthropic/claude-sonnet-4.5",
     "ollama": "llama3.1",
+    "claude-cli": "sonnet",
 }
 
 _STYLE_RULES = (
@@ -78,6 +84,10 @@ def _ollama_reachable():
         return False
 
 
+def _claude_cli_available():
+    return shutil.which("claude") is not None
+
+
 def resolve_provider(choice="auto", model=None):
     """Resolve (provider, model) from a CLI choice plus environment.
 
@@ -92,6 +102,8 @@ def resolve_provider(choice="auto", model=None):
             choice = "openai"
         elif os.environ.get("OPENROUTER_API_KEY"):
             choice = "openrouter"
+        elif _claude_cli_available():
+            choice = "claude-cli"
         elif _ollama_reachable():
             choice = "ollama"
         else:
@@ -100,20 +112,66 @@ def resolve_provider(choice="auto", model=None):
     if choice not in DEFAULT_MODELS:
         raise LLMError(f"Unknown LLM provider: {choice}")
 
-    env_var = f"{choice.upper()}_API_KEY"
-    if choice != "ollama" and not os.environ.get(env_var):
-        raise LLMError(f"Provider '{choice}' selected but {env_var} is not set.")
+    # ollama and claude-cli authenticate locally, not via an *_API_KEY
+    if choice not in ("ollama", "claude-cli"):
+        env_var = f"{choice.upper()}_API_KEY"
+        if not os.environ.get(env_var):
+            raise LLMError(f"Provider '{choice}' selected but {env_var} is not set.")
     if choice == "ollama" and not _ollama_reachable():
         raise LLMError(
             f"Ollama not reachable at {_ollama_host()} (set OLLAMA_HOST to override)."
+        )
+    if choice == "claude-cli" and not _claude_cli_available():
+        raise LLMError(
+            "Provider 'claude-cli' selected but the `claude` CLI is not on PATH."
         )
 
     return choice, (model or DEFAULT_MODELS[choice])
 
 
+def _complete_claude_cli(model, prompt, system):
+    """Run one completion through the local `claude` CLI (`claude -p`).
+
+    Uses the user's Claude Code plan / OAuth session — no API key. The short
+    system prompt goes on the command line; the (large) user prompt goes on
+    stdin to avoid ARG_MAX. Runs in an empty temp dir so the CLI doesn't
+    auto-load this project's CLAUDE.md into context. `--bare` is deliberately
+    NOT used: it would disable OAuth/keychain auth and force an API key.
+    """
+    cmd = ["claude", "-p", "--system-prompt", system]
+    if model:
+        cmd += ["--model", model]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = subprocess.run(
+                cmd,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                cwd=tmp,
+                timeout=300,
+            )
+    except FileNotFoundError:
+        raise LLMError("`claude` CLI not found on PATH.")
+    except subprocess.TimeoutExpired:
+        raise LLMError("`claude` CLI timed out after 300s.")
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise LLMError(
+            f"`claude` CLI exited {proc.returncode}: "
+            f"{detail[-1] if detail else 'no output'}"
+        )
+    out = proc.stdout.strip()
+    if not out:
+        raise LLMError("`claude` CLI returned empty output.")
+    return out
+
+
 def complete(provider, model, prompt, system=SYSTEM_PROMPT):
     """Run one completion and return the text response."""
     try:
+        if provider == "claude-cli":
+            return _complete_claude_cli(model, prompt, system)
         if provider == "anthropic":
             resp = http_post_json(
                 "https://api.anthropic.com/v1/messages",

@@ -9,6 +9,7 @@ statuscheck/
 ├── cli.py        # argparse entry point; `statuscheck <target>` and `statuscheck init`
 ├── discover.py   # target → source (JSON API preferred, RSS/Atom fallback)
 ├── jsonapi.py    # Statuspage-compatible /api/v2/incidents.json fetch + normalize
+├── maintenance.py # /api/v2/scheduled-maintenances.json fetch + window metrics
 ├── wayback.py    # Wayback Machine CDX lookup + snapshot fetching
 ├── parser.py     # RSS/Atom parsing, timed-update extraction, dedup/merge
 ├── analysis.py   # frequency/trend stats, severity, classification, period split
@@ -16,17 +17,19 @@ statuscheck/
 ├── messaging.py  # messaging quality, structure checks, cadence (returns data dicts)
 ├── report.py     # markdown report renderer + rule-based recommendations
 ├── htmlout.py    # markdown → self-contained HTML (report subset only)
-├── llm.py        # optional LLM sections (anthropic/openai/openrouter/ollama)
+├── llm.py        # optional LLM sections (anthropic/openai/openrouter/ollama/claude-cli)
 ├── initcfg.py    # `statuscheck init`: bootstrap a per-company TOML config
 ├── config.py     # optional per-company TOML config loading
 └── net.py        # urllib GET/POST helpers
 ```
 
-Pipeline (see `cli.run`): discover source (JSON API + companion feed, merged) → fetch & merge Wayback snapshots of the feed → compute stats (+ midpoint period split if span ≥ 360 days) → optional `--focus` filter → messaging/cadence/lifecycle/transparency/downtime analysis → optional LLM sections → render `report.md` (+ `report.html` with `--html`) + `incidents.json` into `analyses/<company>/`.
+Pipeline (see `cli.run`): discover source (JSON API + companion feed, merged) → fetch scheduled maintenances (JSON sources only) → fetch & merge Wayback snapshots of the feed → compute stats (+ midpoint period split if span ≥ 360 days) → optional `--focus` filter → messaging/cadence/lifecycle/transparency/downtime + maintenance analysis → optional LLM sections → render `report.md` (+ `report.html` with `--html`) + `incidents.json` into `analyses/<company>/`.
+
+**Scheduled maintenance** (`maintenance.py`) is a *separate* Statuspage endpoint from incidents — it measures maintenance discipline (advance notice, low-impact timing, planned-vs-actual accuracy, blast-radius scoping), not reliability. Retrieval + all metrics are pure code; `analyze_maintenance` returns None for <3 completed windows and reuses `analysis.classify_component` (config-driven categories) for the service breakdown, so a per-company config maps provider-specific service names (e.g. Supabase's "Supavisor" → Connection Pooler) that default categories leave as "Other". The report renders an un-numbered, mode-agnostic `## Scheduled Maintenance` section (like transparency signals) before §3 whenever the feed exists.
 
 ## Report modes and focus
 
-`--mode neutral|self|vendor` changes *framing*, never facts: the title, the LLM system/section prompts (`llm.SYSTEM_PROMPTS` / `llm.MODE_SECTION_OVERRIDES`), section 3's heading and fallback (recommendations vs `report.rule_based_risk_notes`), self-mode extras (untruncated lists, §2.8 exhibits), and vendor mode dropping the templates section. Factual sections — transparency signals (§2.7), disclosed downtime (in §1.7) — render in **all** modes when data supports them; keep it that way.
+`--mode neutral|self|vendor` changes *framing*, never facts: the title, the LLM system/section prompts (`llm.SYSTEM_PROMPTS` / `llm.MODE_SECTION_OVERRIDES`), section 3's heading and fallback (recommendations vs `report.rule_based_risk_notes`), self-mode extras (untruncated lists, §2.8 exhibits), and vendor mode dropping the templates section. Factual sections — transparency signals (§2.7), disclosed downtime (in §1.7), scheduled maintenance (`## Scheduled Maintenance`) — render in **all** modes when data supports them; keep it that way.
 
 `--focus "API, Webhooks"` (see `analysis.filter_focus`) restricts the whole analysis to incidents matching the terms against title, classified category, and component tags — call it after `compute_stats` assigns categories. The unfocused stats are kept as a context row in §1.1.
 
@@ -34,7 +37,7 @@ Disclosed downtime (`lifecycle.disclosed_downtime`) computes its availability wi
 
 ## Design rules
 
-- **Standard library only.** No third-party dependencies, including LLM SDKs — providers are called with raw `urllib` (`net.http_post_json`). Keep it that way.
+- **Standard library only.** No third-party dependencies, including LLM SDKs — HTTP providers are called with raw `urllib` (`net.http_post_json`); the `claude-cli` provider shells out to the local `claude -p` binary (uses the user's Claude Code plan/OAuth, no API key — never `--bare`, which would force an API key). Keep it that way.
 - **Code vs LLM split:** anything countable, parseable, or threshold-checkable is deterministic Python. The LLM is only for judgment: executive summary, tone/sentiment, refining recommendations, drafting templates. Every LLM section must have a deterministic fallback so `--llm none` produces a complete report.
 - **Analysis modules return data, not prints.** `messaging.py`/`analysis.py` return dicts; only `cli.py` prints progress and `report.py` renders markdown.
 - **Keyword matching uses word boundaries** (`\b`) — plain substring matching caused "api" to match inside "Zapier".
@@ -52,7 +55,7 @@ Tests use inline RSS (incident.io style) and Atom (Atlassian Statuspage style) f
 
 | Provider | Sources | Quirks |
 |----------|---------|--------|
-| Atlassian Statuspage | JSON API (`/api/v2/incidents.json`) + Atom (`/history.atom`) | API returns the **50 most recent** incidents with impact, components, timestamped updates. Atom embeds the full timeline as `<strong>Status</strong> - message` blocks, but its timestamps have **no year** and are wrapped in `<var>` tags (`Jul <var> 7</var>, 16:17 UTC`) — `extract_timed_updates` strips `<var>` and infers the year from pubDate. Times may be in the page's local tz abbreviation (mapped in `parser._TZ_OFFSETS`; unknown tz → skip). |
+| Atlassian Statuspage | JSON API (`/api/v2/incidents.json`) + Atom (`/history.atom`); also `/api/v2/scheduled-maintenances.json` for planned windows | API returns the **50 most recent** incidents with impact, components, timestamped updates. Atom embeds the full timeline as `<strong>Status</strong> - message` blocks, but its timestamps have **no year** and are wrapped in `<var>` tags (`Jul <var> 7</var>, 16:17 UTC`) — `extract_timed_updates` strips `<var>` and infers the year from pubDate. Times may be in the page's local tz abbreviation (mapped in `parser._TZ_OFFSETS`; unknown tz → skip). |
 | incident.io | Statuspage-compatible JSON API + RSS 2.0 (`/feed.rss`) | The compat API has resolved_at + timestamped updates but a **shorter window than the RSS feed** (e.g. 25 vs 47 for Zapier) and usually empty components/impact — merge both live sources. RSS links contain a **double slash** (`host//incidents/<id>`) vs the API's single slash; `incident_key` collapses slashes so dedup works. Feed: `<content:encoded>` duplicates the description (stripped in `_clean_xml`); CDATA-wrapped; components in `<li>Component (Operational)</li>`; **only the final update per incident**. |
 | Instatus | RSS 2.0 | Like incident.io's feed, may lack `content:encoded` |
 

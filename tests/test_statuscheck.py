@@ -22,6 +22,7 @@ from statuscheck.initcfg import (
 from statuscheck.jsonapi import parse_statuspage_json
 from statuscheck.lifecycle import analyze_lifecycle, disclosed_downtime, fmt_minutes
 from statuscheck.llm import prompts_for_mode
+from statuscheck.maintenance import analyze_maintenance, parse_scheduled_maintenances
 from statuscheck.messaging import analyze_cadence, analyze_messaging
 from statuscheck.parser import (
     extract_affected_components,
@@ -359,6 +360,152 @@ class TestDisclosedDowntime(unittest.TestCase):
         self.assertIsNone(
             disclosed_downtime([self._incident(1, 2, "major"), self._incident(2, 3, "major")])
         )
+
+
+SCHEDULED_MAINTENANCES_JSON = {
+    "page": {"url": "https://www.acmestatus.com"},
+    "scheduled_maintenances": [
+        {
+            "name": "Database maintenance in us-east-1",
+            "status": "completed",
+            "created_at": "2026-01-01T00:00:00.000Z",
+            "scheduled_for": "2026-01-05T02:00:00.000Z",   # 4d+ lead; 02:00 = off-hours
+            "scheduled_until": "2026-01-05T04:00:00.000Z",  # planned 120m
+            "resolved_at": "2026-01-05T03:30:00.000Z",
+            "incident_updates": [
+                {"status": "completed", "body": "Done.", "created_at": "2026-01-05T03:30:00.000Z"},
+                {"status": "in_progress", "body": "Underway.", "created_at": "2026-01-05T02:00:00.000Z"},
+                {"status": "scheduled", "body": "Maintenance begins in 60 minutes.", "created_at": "2026-01-05T01:00:00.000Z"},
+                {"status": "scheduled", "body": "Planned window.", "created_at": "2026-01-01T00:00:00.000Z"},
+            ],
+        },
+        {
+            "name": "Dashboard maintenance",
+            "status": "completed",
+            "created_at": "2026-02-01T10:00:00.000Z",
+            "scheduled_for": "2026-02-01T20:00:00.000Z",   # 10h lead (< 24h); Sunday
+            "scheduled_until": "2026-02-01T21:00:00.000Z",  # planned 60m
+            "resolved_at": "2026-02-01T21:15:00.000Z",      # actual 75m → +15m overrun
+            "incident_updates": [
+                {"status": "completed", "body": "Done.", "created_at": "2026-02-01T21:15:00.000Z"},
+                {"status": "in_progress", "body": "Underway.", "created_at": "2026-02-01T20:00:00.000Z"},
+                {"status": "scheduled", "body": "Planned window.", "created_at": "2026-02-01T10:00:00.000Z"},
+            ],
+        },
+        {
+            "name": "API maintenance in eu-west-1",
+            "status": "completed",
+            "created_at": "2026-03-01T00:00:00.000Z",
+            "scheduled_for": "2026-03-10T03:00:00.000Z",   # 9d+ lead (≥7d); 03:00 off-hours
+            "scheduled_until": "2026-03-10T04:00:00.000Z",  # planned 60m
+            "resolved_at": "2026-03-10T03:30:00.000Z",      # actual 30m, within plan
+            "incident_updates": [
+                {"status": "completed", "body": "Done.", "created_at": "2026-03-10T03:30:00.000Z"},
+                {"status": "in_progress", "body": "Underway.", "created_at": "2026-03-10T03:00:00.000Z"},
+                {"status": "scheduled", "body": "Planned window.", "created_at": "2026-03-01T00:00:00.000Z"},
+            ],
+        },
+        {
+            # Not completed → must be filtered out of the analysis entirely
+            "name": "Future storage upgrade",
+            "status": "scheduled",
+            "created_at": "2026-04-01T00:00:00.000Z",
+            "scheduled_for": "2026-05-01T02:00:00.000Z",
+            "scheduled_until": "2026-05-01T03:00:00.000Z",
+            "resolved_at": None,
+            "incident_updates": [],
+        },
+    ],
+}
+
+
+class TestMaintenance(unittest.TestCase):
+    def _records(self):
+        return parse_scheduled_maintenances(SCHEDULED_MAINTENANCES_JSON)
+
+    def test_parse_filters_non_completed_and_derives_timing(self):
+        recs = self._records()
+        # only the 3 completed windows survive
+        self.assertEqual(len(recs), 3)
+        by_name = {r["name"]: r for r in recs}
+        db = by_name["Database maintenance in us-east-1"]
+        self.assertEqual(db["planned_minutes"], 120)
+        self.assertEqual(db["actual_minutes"], 90)          # in_progress → completed
+        self.assertEqual(db["lead_minutes"], 4 * 1440 + 120)  # 4d 2h
+        self.assertEqual(db["regions"], ["us-east-1"])
+        self.assertTrue(db["has_reminder"])                 # "begins in 60 minutes"
+        self.assertEqual(db["n_updates"], 4)
+        # overrun is negative (finished early) — not flagged
+        self.assertLess(db["overrun_minutes"], 0)
+
+    def test_analyze_metrics(self):
+        m = analyze_maintenance(self._records(), DEFAULT_COMPONENT_CATEGORIES)
+        self.assertEqual(m["count"], 3)
+        self.assertEqual(m["date_start"], "2026-01-05")
+        self.assertEqual(m["date_end"], "2026-03-10")
+        # advance notice
+        self.assertEqual(m["lead"]["under_24h"], 1)   # Dashboard, 10h
+        self.assertEqual(m["lead"]["over_7d"], 1)     # API, 9d
+        self.assertEqual(m["lead"]["short_notice"][0][0], "Dashboard maintenance")
+        # duration
+        self.assertEqual(m["duration"]["planned_median"], 60)
+        self.assertEqual(m["duration"]["within_plan"], 2)
+        self.assertEqual(m["duration"]["overran"], 1)
+        self.assertEqual(m["duration"]["overruns"][0][0], "Dashboard maintenance")
+        # timing
+        self.assertEqual(m["timing"]["offhours"], 2)  # 02:00 and 03:00 UTC
+        self.assertEqual(m["timing"]["weekend"], 1)   # 2026-02-01 is a Sunday
+        # services classified via the shared category keywords
+        services = dict(m["services"])
+        self.assertEqual(services.get("API"), 1)
+        self.assertEqual(services.get("Dashboard / UI"), 1)
+        self.assertEqual(services.get("Data / Storage"), 1)
+        # regional rollout
+        self.assertEqual(m["regions"]["regional_count"], 2)
+        # communication
+        self.assertEqual(m["comms"]["staged"], 3)
+        self.assertEqual(m["comms"]["reminders"], 1)
+
+    def test_too_few_returns_none(self):
+        one = {"scheduled_maintenances": SCHEDULED_MAINTENANCES_JSON["scheduled_maintenances"][:1]}
+        self.assertIsNone(
+            analyze_maintenance(parse_scheduled_maintenances(one), DEFAULT_COMPONENT_CATEGORIES)
+        )
+
+    def test_renders_into_report(self):
+        m = analyze_maintenance(self._records(), DEFAULT_COMPONENT_CATEGORIES)
+        incidents = parse_feed_auto(RSS_INCIDENT_IO) + parse_feed_auto(ATOM_STATUSPAGE)
+        stats = compute_stats(incidents, "All data", DEFAULT_COMPONENT_CATEGORIES)
+        messaging = analyze_messaging(incidents)
+        md = render_report(
+            company="Acme",
+            stats_all=stats,
+            periods=[stats],
+            messaging=messaging,
+            period_messaging=[messaging],
+            cadence=analyze_cadence(incidents),
+            llm_sections={},
+            meta={"source_label": "test", "snapshots_used": 0},
+            maintenance=m,
+        )
+        self.assertIn("## Scheduled Maintenance", md)
+        self.assertIn("### Advance Notice", md)
+        self.assertIn("### Regional Rollout", md)
+        self.assertIn("Maintenance windows analyzed:", md)
+        # section renders before Recommendations
+        self.assertLess(md.index("## Scheduled Maintenance"), md.index("## 3. Recommendations"))
+
+    def test_absent_when_no_maintenance(self):
+        incidents = parse_feed_auto(RSS_INCIDENT_IO)
+        stats = compute_stats(incidents, "All data", DEFAULT_COMPONENT_CATEGORIES)
+        messaging = analyze_messaging(incidents)
+        md = render_report(
+            company="Acme", stats_all=stats, periods=[stats], messaging=messaging,
+            period_messaging=[messaging], cadence=analyze_cadence(incidents),
+            llm_sections={}, meta={"source_label": "test", "snapshots_used": 0},
+            maintenance=None,
+        )
+        self.assertNotIn("## Scheduled Maintenance", md)
 
 
 class TestModes(unittest.TestCase):

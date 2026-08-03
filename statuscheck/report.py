@@ -236,6 +236,174 @@ def build_comparison(stats_older, stats_newer):
     }
 
 
+def _pct(n, d):
+    return f"{round(100 * n / d)}%" if d else "0%"
+
+
+def render_maintenance(maint):
+    """Render the scheduled-maintenance section as markdown lines.
+
+    Factual and mode-agnostic (like transparency signals) — it renders in
+    every mode whenever the page exposes a scheduled-maintenance feed.
+    """
+    n = maint["count"]
+    L = ["## Scheduled Maintenance", ""]
+    L.append(
+        "*Planned windows from the page's scheduled-maintenance feed "
+        "(separate from the incidents feed). Measures maintenance discipline: "
+        "advance notice, low-impact timing, planned-vs-actual accuracy, and "
+        "blast-radius scoping.*"
+    )
+    L.append("")
+    L.append(
+        f"**{n} completed windows** from {maint['date_start']} to "
+        f"{maint['date_end']} (~{maint['per_year']:.0f}/year). Metrics below are "
+        "computed deterministically from the feed."
+    )
+    L.append("")
+
+    # ── Cadence ──
+    L.append("### Cadence")
+    L.append("")
+    L.extend(_table(["Year", "Windows"], sorted(maint["by_year"].items())))
+    L.append("")
+
+    # ── Advance notice ──
+    lead = maint["lead"]
+    L.append("### Advance Notice")
+    L.append("")
+    L.append(
+        "How far ahead of the window each maintenance was first announced "
+        "(planned start − announcement time):"
+    )
+    L.append("")
+    if lead["median"] is not None:
+        L.extend(
+            _table(
+                ["Metric", "Value"],
+                [
+                    ("Median lead time", fmt_minutes(lead["median"])),
+                    ("Mean lead time", fmt_minutes(lead["mean"])),
+                    ("Shortest", fmt_minutes(max(lead["min"], 0))),
+                    ("Longest", fmt_minutes(lead["max"])),
+                    ("Announced < 24 h ahead", f"{lead['under_24h']}/{n} ({_pct(lead['under_24h'], n)})"),
+                    ("Announced ≥ 7 days ahead", f"{lead['over_7d']}/{n} ({_pct(lead['over_7d'], n)})"),
+                ],
+            )
+        )
+    if lead["short_notice"]:
+        L.append("")
+        L.append("Short-notice windows (< 24 h warning):")
+        L.append("")
+        for name, lead_min, sf in lead["short_notice"][:8]:
+            L.append(
+                f"- **{fmt_minutes(max(lead_min, 0))}** notice — {name} "
+                f"({sf:%Y-%m-%d %H:%M} UTC)"
+            )
+    L.append("")
+
+    # ── Duration ──
+    d = maint["duration"]
+    L.append("### Window Duration — Planned vs Actual")
+    L.append("")
+    if d["planned_median"] is not None and d["actual_median"] is not None:
+        L.extend(
+            _table(
+                ["Metric", "Planned", "Actual"],
+                [
+                    ("Median", fmt_minutes(d["planned_median"]), fmt_minutes(d["actual_median"])),
+                    ("Mean", fmt_minutes(d["planned_mean"]), fmt_minutes(d["actual_mean"])),
+                    ("Longest", fmt_minutes(d["planned_max"]), fmt_minutes(d["actual_max"])),
+                ],
+            )
+        )
+        L.append("")
+        L.append(
+            f"- **Finished within the planned window:** {d['within_plan']}/{d['measurable']} "
+            f"({_pct(d['within_plan'], d['measurable'])}) of windows with measurable timing."
+        )
+        L.append(
+            f"- **Ran past the planned end (>5 min):** {d['overran']}/{d['measurable']} "
+            f"({_pct(d['overran'], d['measurable'])})."
+        )
+    if d["overruns"]:
+        L.append("")
+        L.append("Largest overruns (completion past planned end):")
+        L.append("")
+        for name, over, planned, sf in d["overruns"]:
+            L.append(
+                f"- **+{fmt_minutes(over)}** past plan — {name} "
+                f"(planned {fmt_minutes(planned)}, {sf:%Y-%m-%d})"
+            )
+    if d["longest_planned"]:
+        L.append("")
+        L.append("Longest planned windows:")
+        L.append("")
+        for name, planned, sf in d["longest_planned"]:
+            L.append(f"- **{fmt_minutes(planned)}** — {name} ({sf:%Y-%m-%d})")
+    L.append("")
+
+    # ── Timing ──
+    t = maint["timing"]
+    L.append("### Timing")
+    L.append("")
+    L.append(
+        f"- **Off-hours (00:00–06:00 UTC) starts:** {t['offhours']}/{n} "
+        f"({_pct(t['offhours'], n)})."
+    )
+    L.append(
+        f"- **Weekend starts (Sat/Sun):** {t['weekend']}/{n} "
+        f"({_pct(t['weekend'], n)})."
+    )
+    L.append("")
+    L.append("Window start hour (UTC):")
+    L.append("")
+    L.append("```")
+    max_h = max(t["hours"].values(), default=0)
+    for h in range(24):
+        c = t["hours"].get(h, 0)
+        L.append(f"{h:02d}:00  {c:>3}  {_bar(c, max_h, 30)}")
+    L.append("```")
+    L.append("")
+
+    # ── Services ──
+    L.append("### Affected Services")
+    L.append("")
+    L.extend(_table(["Service (from window title)", "Windows"], maint["services"]))
+    L.append("")
+
+    # ── Regional rollout ──
+    reg = maint["regions"]
+    if reg["regional_count"]:
+        L.append("### Regional Rollout")
+        L.append("")
+        L.append(
+            f"{reg['regional_count']}/{n} windows target a specific region — "
+            "region-scoped maintenance is rolled out one region at a time rather "
+            "than globally."
+        )
+        L.append("")
+        if reg["counts"]:
+            L.extend(_table(["Region", "Windows"], reg["counts"]))
+            L.append("")
+
+    # ── Communication ──
+    c = maint["comms"]
+    L.append("### Communication During Windows")
+    L.append("")
+    L.append(
+        f"- **Staged updates (≥3 posts: scheduled → in progress → completed):** "
+        f"{c['staged']}/{n} ({_pct(c['staged'], n)})."
+    )
+    L.append(
+        f"- **Posted a countdown reminder** (e.g. \"begins in 60 minutes\"): "
+        f"{c['reminders']}/{n} ({_pct(c['reminders'], n)})."
+    )
+    L.append(f"- Average updates per window: **{c['avg_updates']:.1f}**.")
+    L.append("")
+    return L
+
+
 def _fallback_summary(company, stats, messaging, comparison):
     top = stats["components"].most_common(1)
     top_txt = f" The most affected area is {top[0][0]} ({top[0][1]} incidents)." if top else ""
@@ -269,6 +437,7 @@ def render_report(
     downtime=None,    # from disclosed_downtime, or None
     mode="neutral",   # neutral | self | vendor
     overall_stats=None,  # unfocused stats for context when --focus is used
+    maintenance=None,   # from analyze_maintenance, or None
 ):
     comparison = build_comparison(periods[0], periods[1]) if len(periods) == 2 else None
     if mode == "vendor":
@@ -704,6 +873,10 @@ def render_report(
             L.append(f'- **{title}** — "{text[:200]}"')
         L.append("")
 
+    # ── Scheduled maintenance (factual, all modes; when the feed exists) ──
+    if maintenance:
+        L.extend(render_maintenance(maintenance))
+
     # ── 3. Recommendations / risk assessment ──
     L.append(f"## 3. {MODE_SECTION3.get(mode, MODE_SECTION3['neutral'])}")
     L.append("")
@@ -745,6 +918,12 @@ def render_report(
         f"- **Incidents analyzed:** {stats_all['count']} "
         f"({stats_all['date_start']} → {stats_all['date_end']})"
     )
+    if maintenance:
+        L.append(
+            f"- **Maintenance windows analyzed:** {maintenance['count']} completed "
+            f"({maintenance['date_start']} → {maintenance['date_end']}), from the "
+            "page's scheduled-maintenances API"
+        )
     L.append(
         f"- **Quantitative analysis:** deterministic Python (parsing, classification, "
         "counting, regex checks) — reproducible from the same source data"
