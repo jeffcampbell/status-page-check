@@ -22,6 +22,7 @@ from .config import load_config
 from .discover import DiscoveryError, discover_source
 from .lifecycle import analyze_lifecycle, disclosed_downtime
 from .llm import LLMError, build_context, generate_sections, resolve_provider
+from .maintenance import analyze_maintenance, fetch_scheduled_maintenances
 from .messaging import analyze_cadence, analyze_messaging
 from .net import FetchError
 from .parser import extract_resolved_message, merge_incidents, parse_feed_auto
@@ -33,7 +34,9 @@ from .report import (
 )
 from .wayback import fetch_history
 
-LLM_CHOICES = ["auto", "anthropic", "openai", "openrouter", "ollama", "none"]
+LLM_CHOICES = [
+    "auto", "anthropic", "claude-cli", "openai", "openrouter", "ollama", "none"
+]
 
 
 def _slug(url):
@@ -216,6 +219,17 @@ def run(args):
     else:
         (raw_dir / "current.xml").write_text(source["xml"], encoding="utf-8")
 
+    # Scheduled maintenance lives on a separate Statuspage endpoint from
+    # incidents; fetch it when we have a JSON API page URL.
+    maint_records = []
+    if source["type"] == "json":
+        maint_raw, maint_records = fetch_scheduled_maintenances(source["page_url"])
+        if maint_raw:
+            (raw_dir / "scheduled_maintenances.json").write_text(
+                maint_raw, encoding="utf-8"
+            )
+            print(f"Scheduled maintenance: {len(maint_records)} completed window(s)")
+
     # ── 2. Wayback Machine history (via the page's feed) ──
     snapshots = []
     feed_url = source.get("feed_url")
@@ -293,6 +307,7 @@ def run(args):
         )
     transparency = analyze_transparency(incidents)
     downtime = disclosed_downtime(incidents)
+    maintenance = analyze_maintenance(maint_records, categories) if maint_records else None
     comparison = build_comparison(periods[0], periods[1]) if len(periods) == 2 else None
 
     # ── 4. Qualitative sections (optional LLM) ──
@@ -349,6 +364,7 @@ def run(args):
         downtime=downtime,
         mode=args.mode,
         overall_stats=overall_stats,
+        maintenance=maintenance,
     )
     report_path = out_dir / "report.md"
     report_path.write_text(report_md, encoding="utf-8")
