@@ -8,15 +8,22 @@ from email.utils import parsedate_to_datetime
 
 
 def _clean_xml(xml_text):
-    """Strip content:encoded blocks and XML namespaces for clean parsing.
+    """Strip namespaced elements and XML namespace declarations for clean parsing.
 
-    incident.io feeds duplicate the description in <content:encoded>;
-    ElementTree handles namespaced elements awkwardly, so both are removed
-    up front.
+    incident.io feeds duplicate the description in <content:encoded>; Rootly
+    RSS carries <atom:link>, <media:group>/<media:content>, etc. None of the
+    prefixed elements are read by the parsers, and once the xmlns declarations
+    are removed ElementTree rejects any remaining prefix as unbound — so all
+    namespaced elements are dropped up front.
     """
     xml_text = re.sub(
         r"<content:encoded>.*?</content:encoded>", "", xml_text, flags=re.DOTALL
     )
+    # Paired namespaced blocks, then any self-closing namespaced tags
+    xml_text = re.sub(
+        r"<(\w+):([\w-]+)\b[^>]*>.*?</\1:\2>", "", xml_text, flags=re.DOTALL
+    )
+    xml_text = re.sub(r"<\w+:[\w-]+\b[^>]*?/>", "", xml_text)
     xml_text = re.sub(r'xmlns:\w+="[^"]*"', "", xml_text)
     return xml_text
 

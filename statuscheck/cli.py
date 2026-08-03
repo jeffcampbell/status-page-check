@@ -201,6 +201,15 @@ def run(args):
             feed_incidents = parse_feed_auto(source["feed_xml"])
             incidents_current = merge_incidents(incidents_current, feed_incidents)
             source_label += f" + feed ({source['feed_url']})"
+    elif source["type"] == "rootly":
+        # Rootly feeds carry only a one-line summary per incident; the source
+        # already enriched each with its detail-page timeline.
+        incidents_current = source["incidents"]
+        primary_url = source["page_url"]
+        source_label = (
+            f"Rootly status page (feed {source['feed_url']}, "
+            "timelines scraped from detail pages)"
+        )
     else:
         incidents_current = parse_feed_auto(source["xml"])
         primary_url = source["feed_url"]
@@ -217,7 +226,10 @@ def run(args):
     if source["type"] == "json":
         (raw_dir / "current.json").write_text(source["raw"], encoding="utf-8")
     else:
-        (raw_dir / "current.xml").write_text(source["xml"], encoding="utf-8")
+        # feed sources carry "xml"; rootly carries the feed as "raw"
+        (raw_dir / "current.xml").write_text(
+            source.get("xml") or source["raw"], encoding="utf-8"
+        )
 
     # Scheduled maintenance lives on a separate Statuspage endpoint from
     # incidents; fetch it when we have a JSON API page URL.

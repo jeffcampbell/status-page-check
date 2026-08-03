@@ -33,6 +33,12 @@ from statuscheck.parser import (
     parse_feed_auto,
 )
 from statuscheck.report import render_report, rule_based_recommendations
+from statuscheck.rootly import (
+    _enrich_from_detail,
+    _extract_timed_updates,
+    _parse_detail_time,
+    is_rootly_feed,
+)
 from statuscheck.wayback import select_spread
 
 RSS_INCIDENT_IO = """<?xml version="1.0" encoding="UTF-8"?>
@@ -700,6 +706,130 @@ class TestMessagingAndReport(unittest.TestCase):
         self.assertIn("Appendix B", md)
         # No LLM → no templates appendix
         self.assertNotIn("Appendix A", md)
+
+
+RSS_ROOTLY = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/">
+  <channel>
+    <title>WIDGETCO - Incident History</title>
+    <link>https://status.widgetco.com/history</link>
+    <atom:link href="https://status.widgetco.com/history.rss" rel="self" type="application/rss+xml"/>
+    <image>
+      <url>https://rootly.com/rails/active_storage/logo.png</url>
+      <title>WIDGETCO - Incident History</title>
+      <link>https://status.widgetco.com/history</link>
+    </image>
+    <item>
+      <title><![CDATA[API latency spike]]></title>
+      <description><![CDATA[[Resolved] Elevated latency on the public API]]></description>
+      <pubDate>Fri, 27 Feb 2026 10:30:42 -0800</pubDate>
+      <link>https://status.widgetco.com/incidents/aaaa1111</link>
+      <guid>https://status.widgetco.com/incidents/aaaa1111</guid>
+      <media:group>
+        <media:content medium="image" url="https://rootly.com/rails/active_storage/logo.png"/>
+      </media:group>
+    </item>
+  </channel>
+</rss>
+"""
+
+# Rootly incident detail page: the "Updates" list is the only place the full
+# timeline lives. Two updates, newest-first, UTC timestamps, plus the header
+# start time that anchors created_at.
+ROOTLY_DETAIL_HTML = """<html><body>
+<section>
+  <h2 class="text-4xl">API latency spike</h2>
+  <div class="text-gray-700 text-base flex">
+    <span>February 27, 2026 at 09:49 PM UTC</span>
+    <span class="pl-2">Resolved after 22m</span>
+  </div>
+</section>
+<div class="divide-y">
+  <div class="flex flex-col mb-4 gap-1">
+    <span class="text-base font-semibold text-green-500">Resolved</span>
+    <div class="text-gray-900 text-base break-words trix-content">
+      <p class="redcarpet">The issue is resolved. We apologize for the disruption.</p>
+    </div>
+    <div class="text-gray-700 text-sm">
+      February 27, 2026 at 10:11 PM UTC
+    </div>
+  </div>
+  <div class="flex flex-col mb-4 gap-1">
+    <span class="text-base font-semibold text-yellow-500">Investigating</span>
+    <div class="text-gray-900 text-base break-words trix-content">
+      <p class="redcarpet">We are investigating elevated API latency.</p>
+    </div>
+    <div class="text-gray-700 text-sm">
+      February 27, 2026 at 09:49 PM UTC
+    </div>
+  </div>
+</div>
+</body></html>
+"""
+
+
+class TestRootly(unittest.TestCase):
+    def test_namespaced_rss_parses(self):
+        # atom:link + media:group would otherwise trip ElementTree with an
+        # "unbound prefix" once xmlns declarations are stripped
+        incidents = parse_feed_auto(RSS_ROOTLY)
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["title"], "API latency spike")
+        self.assertEqual(
+            incidents[0]["link"], "https://status.widgetco.com/incidents/aaaa1111"
+        )
+
+    def test_is_rootly_feed(self):
+        self.assertTrue(is_rootly_feed(RSS_ROOTLY))
+        self.assertFalse(is_rootly_feed(RSS_INCIDENT_IO))
+
+    def test_parse_detail_time(self):
+        dt = _parse_detail_time("February 27, 2026 at 10:11 PM UTC")
+        self.assertEqual((dt.year, dt.month, dt.day, dt.hour, dt.minute), (2026, 2, 27, 22, 11))
+        self.assertEqual(dt.tzinfo, timezone.utc)
+        self.assertIsNone(_parse_detail_time("not a date"))
+
+    def test_extract_timed_updates_ordered_oldest_first(self):
+        ups = _extract_timed_updates(ROOTLY_DETAIL_HTML)
+        self.assertEqual([u["status"] for u in ups], ["Investigating", "Resolved"])
+        self.assertEqual(ups[0]["at"].hour, 21)
+        self.assertEqual(ups[-1]["at"].hour, 22)
+        self.assertIn("investigating elevated API latency", ups[0]["message"])
+
+    def test_enrich_builds_rich_incident(self):
+        feed_incident = parse_feed_auto(RSS_ROOTLY)[0]
+        # Avoid network: feed the detail HTML in directly
+        enriched = _enrich_from_detail(feed_incident, ROOTLY_DETAIL_HTML)
+        # desc_raw is rebuilt in the Atlassian shape so messaging regexes work
+        self.assertIn("<strong>Resolved</strong>", enriched["desc_raw"])
+        self.assertIn("<strong>Investigating</strong>", enriched["desc_raw"])
+        self.assertEqual(len(enriched["updates_timed"]), 2)
+        # pub_date is anchored to the detail start (09:49 PM), not the feed's
+        # resolution-time pubDate — so it equals created_at
+        self.assertEqual(enriched["pub_date"], enriched["created_at"])
+        self.assertEqual(enriched["created_at"].hour, 21)
+        self.assertEqual(enriched["resolved_at"].hour, 22)
+
+    def test_enrich_lifecycle_and_transparency(self):
+        base = parse_feed_auto(RSS_ROOTLY)[0]
+        # Build 3 enriched incidents so lifecycle has enough coverage
+        incs = [_enrich_from_detail(dict(base, link=f"x{i}"), ROOTLY_DETAIL_HTML) for i in range(3)]
+        lc = analyze_lifecycle(incs)
+        self.assertIsNotNone(lc)
+        self.assertEqual(lc["covered"], 3)
+        # 22-minute incidents → within 1h
+        self.assertEqual(lc["within"]["1h"], 100.0)
+        # pub_date == created_at → no false late-disclosure flag
+        tr = analyze_transparency(incs)
+        self.assertEqual(len(tr["backfilled"]), 0)
+
+    def test_enrich_falls_back_to_feed_summary(self):
+        # No detail page: the "[Resolved] summary" one-liner is normalized so
+        # the status is still recognized downstream
+        feed_incident = parse_feed_auto(RSS_ROOTLY)[0]
+        enriched = _enrich_from_detail(feed_incident, None)
+        self.assertIn("<strong>Resolved</strong>", enriched["desc_raw"])
+        self.assertIn("Elevated latency", enriched["desc_text"])
 
 
 if __name__ == "__main__":

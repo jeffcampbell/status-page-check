@@ -40,7 +40,7 @@ almost any incident (e.g. "issue", "error", "service")."""
 
 def incidents_from_source(source):
     """Get the incident list out of a discover_source() result."""
-    if source["type"] == "json":
+    if source["type"] in ("json", "rootly"):
         return source["incidents"]
     return parse_feed_auto(source["xml"])
 

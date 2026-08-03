@@ -5,6 +5,7 @@ from urllib.parse import urljoin, urlparse
 
 from .jsonapi import try_statuspage_api
 from .net import FetchError, http_get
+from .rootly import try_rootly
 
 # Common feed paths by provider:
 #   incident.io: /feed.rss, /history.rss (older)
@@ -155,7 +156,7 @@ def discover_source(target, progress=lambda msg: None, prefer="auto"):
     # An explicit feed URL bypasses API probing
     if prefer != "json" and _looks_like_feed_url(direct):
         feed_url, xml = discover_feed(target, progress)
-        return {"type": "feed", "feed_url": feed_url, "xml": xml}
+        return _feed_or_rootly(feed_url, xml, prefer, progress)
 
     if prefer in ("auto", "json"):
         for base in _candidate_bases(target):
@@ -187,4 +188,22 @@ def discover_source(target, progress=lambda msg: None, prefer="auto"):
         progress("No Statuspage JSON API found; falling back to feed discovery.")
 
     feed_url, xml = discover_feed(target, progress)
+    return _feed_or_rootly(feed_url, xml, prefer, progress)
+
+
+def _feed_or_rootly(feed_url, xml, prefer, progress):
+    """Wrap a discovered feed as a plain feed source, upgrading it to a rich
+    Rootly source when the page is Rootly-hosted.
+
+    Rootly's feeds carry only a one-line summary per incident; the real
+    timeline lives in the HTML detail pages, so 'auto' scrapes them for the
+    same lifecycle/messaging analysis the JSON API path affords. '--source
+    feed' opts out of that enrichment and takes the raw feed as-is.
+    """
+    if prefer != "feed":
+        parsed = urlparse(feed_url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        rootly = try_rootly(base, feed_url=feed_url, feed_xml=xml, progress=progress)
+        if rootly:
+            return rootly
     return {"type": "feed", "feed_url": feed_url, "xml": xml}
